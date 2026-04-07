@@ -38,6 +38,14 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    def update_contact(self, contact_id, name, email, category, family_id):
+        try:
+            fid = int(family_id) if family_id else None
+            db_manager.update_contact(int(contact_id), name, email, category, fid)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     def delete_contacts(self, ids):
         for cid in ids:
             db_manager.delete_contact(int(cid))
@@ -58,6 +66,13 @@ class Api:
     def add_family(self, name):
         try:
             db_manager.add_family(name)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def rename_family(self, family_id, new_name):
+        try:
+            db_manager.rename_family(int(family_id), new_name)
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -255,6 +270,13 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    def rename_group(self, group_id, new_name):
+        try:
+            db_manager.rename_group(int(group_id), new_name)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     def delete_group(self, group_id):
         db_manager.delete_group(int(group_id))
         return {"ok": True}
@@ -269,6 +291,17 @@ class Api:
     def remove_group_member(self, group_id, contact_id):
         db_manager.remove_group_member(int(group_id), int(contact_id))
         return {"ok": True}
+
+    def add_family_to_group(self, group_id, family_id):
+        members = db_manager.get_contacts_by_family(int(family_id))
+        added = 0
+        for m in members:
+            try:
+                db_manager.add_group_member(int(group_id), m[0])
+                added += 1
+            except Exception:
+                pass
+        return {"ok": True, "added": added}
 
     # ── Scheduled Emails ──
 
@@ -288,6 +321,40 @@ class Api:
              "recurrence": json.loads(r[8]) if r[8] else None}
             for r in rows
         ]
+
+    def get_scheduled_emails_with_recipients(self):
+        rows = db_manager.get_scheduled_emails()
+        result = []
+        for r in rows:
+            entry = {"id": r[0], "subject": r[1], "target_type": r[2], "target_id": r[3],
+                     "scheduled_at": r[4], "status": r[5], "sent_at": r[6], "result": r[7],
+                     "recurrence": json.loads(r[8]) if r[8] else None}
+            contact_ids = json.loads(r[9]) if r[9] else []
+            manual_emails = json.loads(r[10]) if r[10] else []
+            recipients = self.resolve_recipients(entry["target_type"], entry["target_id"], contact_ids)
+            for me in manual_emails:
+                if not any(rec[1] == me for rec in recipients):
+                    recipients.append(("", me))
+            entry["recipients"] = [{"name": n, "email": e} for n, e in recipients]
+            result.append(entry)
+        return result
+
+    def get_scheduled_email_detail(self, email_id):
+        r = db_manager.get_scheduled_email_by_id(int(email_id))
+        if not r:
+            return None
+        entry = {"id": r[0], "subject": r[1], "html_body": r[2], "plain_text": r[3],
+                 "target_type": r[4], "target_id": r[5], "scheduled_at": r[8],
+                 "status": r[9], "sent_at": r[10], "result": r[11],
+                 "recurrence": json.loads(r[12]) if r[12] else None}
+        contact_ids = json.loads(r[6]) if r[6] else []
+        manual_emails = json.loads(r[13]) if r[13] else []
+        recipients = self.resolve_recipients(entry["target_type"], entry["target_id"], contact_ids)
+        for me in manual_emails:
+            if not any(rec[1] == me for rec in recipients):
+                recipients.append(("", me))
+        entry["recipients"] = [{"name": n, "email": e} for n, e in recipients]
+        return entry
 
     def cancel_scheduled_email(self, email_id):
         db_manager.cancel_scheduled_email(int(email_id))
@@ -524,6 +591,38 @@ HTML = r"""<!DOCTYPE html>
   .tab-content { display: none; flex-direction: column; flex: 1; overflow: hidden; }
   .tab-content.active { display: flex; }
 
+  /* ── Schedule Calendar ── */
+  .sched-day-row { margin-bottom: 4px; border-radius: 6px; background: var(--card-bg); padding: 8px 10px; }
+  .sched-day-row.sched-day-today { border: 2px solid var(--accent); }
+  .sched-day-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .sched-day-label { font-weight: 700; font-size: 13px; color: var(--text); }
+  .sched-day-today .sched-day-label { color: var(--accent); }
+  .sched-day-cards { display: flex; flex-direction: column; gap: 4px; }
+  .sched-email-card {
+    background: var(--surface); border-radius: 5px; padding: 7px 10px; font-size: 12px;
+    border-left: 3px solid var(--accent); position: relative; cursor: default;
+  }
+  .sched-email-card[data-status="sent"] { border-left-color: var(--success); }
+  .sched-email-card[data-status="failed"], .sched-email-card[data-status="cancelled"] { border-left-color: var(--danger); }
+  .sched-card-subject { font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 2px; }
+  .sched-card-meta { color: var(--text-muted); font-size: 11px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .sched-card-status { font-weight: 700; text-transform: uppercase; font-size: 10px; }
+  .sched-tooltip {
+    display: none; position: absolute; z-index: 100; background: var(--card-bg); border: 1px solid var(--accent);
+    border-radius: 6px; padding: 10px 12px; font-size: 12px; color: var(--text); min-width: 220px; max-width: 320px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.25); left: 50%; top: 100%; transform: translateX(-50%); margin-top: 4px;
+    white-space: normal; line-height: 1.5;
+  }
+  .sched-email-card:hover .sched-tooltip { display: block; }
+  .sched-add-btn {
+    background: none; border: 1px dashed var(--text-muted); border-radius: 5px; padding: 3px; margin-top: 4px;
+    color: var(--text-muted); cursor: pointer; font-size: 16px; width: 100%; text-align: center; transition: all 0.2s;
+  }
+  .sched-add-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .sched-empty-day { color: var(--text-muted); font-size: 11px; font-style: italic; }
+  .sched-email-card.clickable { cursor: pointer; }
+  .sched-email-card.clickable:hover { filter: brightness(1.1); }
+
   /* ── Scrollable lists ── */
   .list-area { flex: 1; overflow-y: auto; margin-bottom: 10px; border-radius: 6px; background: var(--surface); padding: 6px; }
   .list-area::-webkit-scrollbar { width: 6px; }
@@ -532,12 +631,42 @@ HTML = r"""<!DOCTYPE html>
   .contact-row, .family-card {
     display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 5px; font-size: 13px;
   }
+  .contact-row { position: relative; }
   .contact-row:hover { background: var(--row-hover); }
   .contact-row input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
   .contact-row .name { flex: 1; font-weight: 500; }
   .contact-row .email { flex: 1; color: var(--text-muted); }
-  .contact-row .cat { width: 55px; font-size: 11px; color: var(--text-muted); }
+  .contact-row .cat { width: 24px; font-size: 14px; color: var(--accent); text-align: center; }
   .contact-row .fam { width: 80px; font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .contact-edit-btn {
+    background: none; border: none; cursor: pointer; color: var(--text-muted); font-size: 14px;
+    padding: 2px 5px; border-radius: 4px; transition: color 0.15s;
+  }
+  .contact-edit-btn:hover { color: var(--accent); }
+
+  /* Contact edit dropdown */
+  .contact-edit-overlay {
+    display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.35); z-index: 9999;
+  }
+  .contact-edit-overlay.show { display: block; }
+  .contact-edit-dropdown {
+    background: var(--surface); border: 1px solid var(--accent); border-radius: 8px;
+    padding: 12px 14px; display: flex; flex-direction: column; gap: 6px;
+    box-shadow: 0 6px 24px rgba(0,0,0,0.25); z-index: 10000; position: absolute;
+    left: 10px; right: 10px; top: 100%; margin-top: 2px;
+    animation: editDropIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  @keyframes editDropIn {
+    0% { opacity: 0; transform: scaleY(0.3) translateY(-8px); }
+    100% { opacity: 1; transform: scaleY(1) translateY(0); }
+  }
+  .contact-edit-dropdown .edit-row { display: flex; gap: 6px; }
+  .contact-edit-dropdown input, .contact-edit-dropdown select {
+    flex: 1; padding: 6px 8px; font-size: 12px; border: 1px solid var(--border);
+    border-radius: 5px; background: var(--bg); color: var(--text);
+  }
+  .contact-edit-dropdown .edit-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 2px; }
 
   .family-card {
     flex-direction: column; align-items: flex-start; background: var(--card-bg); margin-bottom: 6px; padding: 10px 12px;
@@ -661,6 +790,15 @@ HTML = r"""<!DOCTYPE html>
   .ac-detail { color: var(--text-muted); font-size: 11px; }
 
   /* ── Tab search bars ── */
+  .search-row { display: flex; gap: 6px; margin-bottom: 8px; align-items: center; }
+  .search-row .tab-search { margin-bottom: 0; flex: 1; }
+  .add-btn {
+    width: 32px; height: 32px; border: none; border-radius: 6px; cursor: pointer;
+    background: var(--accent); color: #fff; font-size: 20px; font-weight: 600;
+    display: flex; align-items: center; justify-content: center; transition: background 0.15s;
+    flex-shrink: 0; line-height: 1;
+  }
+  .add-btn:hover { background: var(--accent-hover); }
   .tab-search {
     width: 100%; padding: 6px 10px; margin-bottom: 8px; border: 1px solid var(--border);
     border-radius: 6px; background: var(--surface); color: var(--text); font-size: 12px;
@@ -668,6 +806,60 @@ HTML = r"""<!DOCTYPE html>
   }
   .tab-search:focus { border-color: var(--accent); }
   .tab-search::placeholder { color: var(--text-dim); }
+
+  /* Create modal (used for new contact/family/group) */
+  .create-overlay {
+    display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.35); z-index: 9999;
+  }
+  .create-overlay.show { display: block; }
+  .create-modal {
+    position: fixed; z-index: 10000;
+    top: 50%; left: 50%; transform: translate(-50%, -50%) scale(0.3);
+    background: var(--surface); border: 1px solid var(--accent); border-radius: 10px;
+    padding: 18px 20px; min-width: 340px; max-width: 420px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+    display: none; flex-direction: column; gap: 8px;
+    animation: createPopIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+  }
+  .create-modal.show { display: flex; }
+  @keyframes createPopIn {
+    0% { opacity: 0; transform: translate(-50%, -50%) scale(0.3); }
+    100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  }
+  .create-modal h3 { margin: 0 0 4px; font-size: 15px; color: var(--text); font-weight: 700; }
+  .create-modal .edit-row { display: flex; gap: 6px; }
+  .create-modal input, .create-modal select {
+    flex: 1; padding: 7px 10px; font-size: 13px; border: 1px solid var(--border);
+    border-radius: 6px; background: var(--bg); color: var(--text);
+  }
+  .create-modal .edit-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 4px; }
+
+  /* Edit modal shared styles (Groups & Families) */
+  .edit-member-list {
+    max-height: 150px; overflow-y: auto; margin: 4px 0; display: flex; flex-wrap: wrap; gap: 4px;
+  }
+  .edit-member-pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
+    padding: 3px 10px; font-size: 11px; color: var(--text);
+  }
+  .edit-member-pill .remove-x {
+    cursor: pointer; color: var(--danger); font-weight: bold; font-size: 13px; line-height: 1;
+  }
+  .edit-member-pill .remove-x:hover { opacity: 0.7; }
+  .edit-search-results {
+    max-height: 120px; overflow-y: auto; border: 1px solid var(--border);
+    border-radius: 6px; margin-top: 4px; background: var(--bg);
+  }
+  .edit-search-results .esr-item {
+    padding: 5px 8px; font-size: 12px; cursor: pointer; color: var(--text);
+    border-bottom: 1px solid var(--border);
+  }
+  .edit-search-results .esr-item:last-child { border-bottom: none; }
+  .edit-search-results .esr-item:hover { background: var(--row-hover); }
+  .edit-search-results .esr-email { color: var(--text-muted); font-size: 11px; margin-left: 4px; }
+  .edit-section-label { font-size: 12px; color: var(--text-muted); margin: 6px 0 2px; font-weight: 600; }
 
   /* ── Right panel: Composer ── */
   .composer-title { font-size: 16px; font-weight: 700; margin-bottom: 10px; }
@@ -782,21 +974,12 @@ HTML = r"""<!DOCTYPE html>
 
     <!-- Contacts Tab -->
     <div id="contacts-tab" class="tab-content active">
-      <input type="text" class="tab-search" id="search-contacts" placeholder="Search contacts..." oninput="filterContacts()">
+      <div class="search-row">
+        <input type="text" class="tab-search" id="search-contacts" placeholder="Search contacts..." oninput="filterContacts()">
+        <button class="add-btn" onclick="openCreateContact()" title="Add Contact">+</button>
+      </div>
       <div class="list-area" id="contact-list"></div>
-      <div class="form-row">
-        <input type="text" id="c-name" placeholder="Name">
-        <input type="text" id="c-email" placeholder="Email">
-      </div>
-      <div class="form-row">
-        <select id="c-category" onchange="onCategoryChange()">
-          <option value="Single">Single</option>
-          <option value="Family">Family</option>
-        </select>
-        <select id="c-family" disabled><option value="">No family</option></select>
-      </div>
       <div class="btn-row">
-        <button class="btn btn-primary" onclick="addContact()">Add Contact</button>
         <button class="btn btn-danger" onclick="deleteSelected()">Delete Selected</button>
         <button class="btn btn-primary btn-success" onclick="importCSV()">Import CSV</button>
         <button class="btn btn-primary" onclick="exportCSV()">Export CSV</button>
@@ -805,35 +988,30 @@ HTML = r"""<!DOCTYPE html>
 
     <!-- Families Tab -->
     <div id="families-tab" class="tab-content">
-      <input type="text" class="tab-search" id="search-families" placeholder="Search families..." oninput="filterFamilies()">
-      <div class="list-area" id="family-list"></div>
-      <div class="form-row">
-        <input type="text" id="f-name" placeholder="New Family Name">
-        <button class="btn btn-primary" onclick="createFamily()">Create Family</button>
+      <div class="search-row">
+        <input type="text" class="tab-search" id="search-families" placeholder="Search families..." oninput="filterFamilies()">
+        <button class="add-btn" onclick="openCreateFamily()" title="Add Family">+</button>
       </div>
+      <div class="list-area" id="family-list"></div>
     </div>
 
     <!-- Groups Tab -->
     <div id="groups-tab" class="tab-content">
-      <input type="text" class="tab-search" id="search-groups" placeholder="Search groups..." oninput="filterGroups()">
+      <div class="search-row">
+        <input type="text" class="tab-search" id="search-groups" placeholder="Search groups..." oninput="filterGroups()">
+        <button class="add-btn" onclick="openCreateGroup()" title="Add Group">+</button>
+      </div>
       <div class="list-area" id="group-list"></div>
-      <div class="form-row">
-        <input type="text" id="g-name" placeholder="New Group Name">
-        <button class="btn btn-primary" onclick="createGroup()">Create Group</button>
-      </div>
-      <div style="margin-top:8px;">
-        <div class="section-label">Add member to group:</div>
-        <div class="form-row">
-          <select id="g-select"><option value="">Select group</option></select>
-          <select id="g-contact"><option value="">Select contact</option></select>
-          <button class="btn btn-primary btn-sm" onclick="addMemberToGroup()">Add</button>
-        </div>
-      </div>
     </div>
 
     <!-- Scheduled Tab -->
     <div id="scheduled-tab" class="tab-content">
-      <div class="list-area" id="scheduled-list"></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+        <button class="btn btn-sm" onclick="schedChangeMonth(-1)">&#9664; Prev</button>
+        <span id="sched-month-label" style="font-weight:700;font-size:15px;color:var(--text);"></span>
+        <button class="btn btn-sm" onclick="schedChangeMonth(1)">Next &#9654;</button>
+      </div>
+      <div class="list-area" id="scheduled-calendar" style="flex:1;overflow-y:auto;"></div>
     </div>
 
     <!-- History Tab -->
@@ -898,7 +1076,7 @@ HTML = r"""<!DOCTYPE html>
       <select id="template-select" class="composer-select" onchange="loadTemplate()">
         <option value="">Load template...</option>
       </select>
-      <button class="btn btn-primary btn-sm" onclick="saveAsTemplate()">Save Template</button>
+      <button class="btn btn-primary btn-sm" id="btn-save-template" onclick="saveAsTemplate()">Save Template</button>
       <button class="btn btn-danger btn-sm" onclick="deleteCurrentTemplate()">Del</button>
     </div>
     <div class="recipient-field">
@@ -954,15 +1132,18 @@ HTML = r"""<!DOCTYPE html>
           <input type="datetime-local" id="recurrence-end-date" class="composer-select">
         </div>
         <div style="flex:1;"></div>
-        <button class="btn btn-primary btn-nowrap" onclick="scheduleEmail()">Save &amp; Schedule</button>
+        <button class="btn btn-primary btn-nowrap" id="btn-schedule" onclick="scheduleEmail()">Save &amp; Schedule</button>
       </div>
     </div>
-    <button class="btn-dispatch" onclick="dispatchEmails()">Send Now</button>
+    <button class="btn-dispatch" id="btn-send-now" onclick="dispatchEmails()">Send Now</button>
   </div>
 </div>
 
 <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()">Light Mode</button>
 <div class="toast" id="toast"></div>
+<div class="contact-edit-overlay" id="contact-edit-overlay" onclick="closeEditContact()"></div>
+<div class="create-overlay" id="create-overlay" onclick="closeCreateModal()"></div>
+<div class="create-modal" id="create-modal"></div>
 
 <div class="modal-overlay" id="template-save-modal">
   <div class="modal-box">
@@ -1065,12 +1246,13 @@ function renderContactList(contacts) {
   const el = document.getElementById('contact-list');
   if (!contacts.length) { renderEmpty(el, 'No contacts yet.'); return; }
   el.innerHTML = contacts.map(c => `
-    <div class="contact-row">
+    <div class="contact-row" id="contact-row-${c.id}">
       <input type="checkbox" data-id="${c.id}">
       <span class="name">${esc(c.name)}</span>
       <span class="email">${esc(c.email)}</span>
-      <span class="cat">${esc(c.category)}</span>
+      <span class="cat">${c.category === 'Family' ? '&#10003;' : ''}</span>
       <span class="fam">${c.family_name ? esc(c.family_name) : '-'}</span>
+      <button class="contact-edit-btn" onclick="editContact(${c.id})" title="Edit">&#9998;</button>
     </div>
   `).join('');
 }
@@ -1085,20 +1267,51 @@ window.filterContacts = function() {
   renderContactList(filtered);
 };
 
-window.addContact = async function() {
-  const name = document.getElementById('c-name').value.trim();
-  const email = document.getElementById('c-email').value.trim();
-  const category = document.getElementById('c-category').value;
-  const familySel = document.getElementById('c-family');
-  const familyId = familySel.value || null;
+// ── Create modal helpers ──
 
+function showCreateModal(html) {
+  var modal = document.getElementById('create-modal');
+  modal.innerHTML = html;
+  // Remove old animation class, re-trigger
+  modal.classList.remove('show');
+  void modal.offsetWidth;
+  modal.classList.add('show');
+  requestAnimationFrame(function() {
+    document.getElementById('create-overlay').classList.add('show');
+  });
+}
+
+window.closeCreateModal = function() {
+  document.getElementById('create-modal').classList.remove('show');
+  document.getElementById('create-overlay').classList.remove('show');
+};
+
+window.openCreateContact = function() {
+  var famOptions = '<option value="">No family</option>';
+  cachedFamilies.forEach(function(f) {
+    famOptions += '<option value="' + f.id + '">' + esc(f.name) + '</option>';
+  });
+  showCreateModal(
+    '<h3>New Contact</h3>' +
+    '<div class="edit-row"><input type="text" id="cm-name" placeholder="Name"><input type="text" id="cm-email" placeholder="Email"></div>' +
+    '<div class="edit-row">' +
+      '<select id="cm-category" onchange="document.getElementById(\'cm-family\').disabled = this.value !== \'Family\'"><option value="Single">Single</option><option value="Family">Family</option></select>' +
+      '<select id="cm-family" disabled>' + famOptions + '</select>' +
+    '</div>' +
+    '<div class="edit-actions"><button class="btn btn-sm" onclick="closeCreateModal()">Cancel</button><button class="btn btn-primary btn-sm" onclick="submitCreateContact()">Add</button></div>'
+  );
+  document.getElementById('cm-name').focus();
+};
+
+window.submitCreateContact = async function() {
+  var name = document.getElementById('cm-name').value.trim();
+  var email = document.getElementById('cm-email').value.trim();
+  var category = document.getElementById('cm-category').value;
+  var familyId = document.getElementById('cm-family').value || null;
   if (!name || !email) { showToast('Enter both name and email.', 'error'); return; }
-
-  const res = await pywebview.api.add_contact(name, email, category, familyId);
+  var res = await pywebview.api.add_contact(name, email, category, familyId);
   if (!res.ok) { showToast(res.error, 'error'); return; }
-
-  document.getElementById('c-name').value = '';
-  document.getElementById('c-email').value = '';
+  closeCreateModal();
   loadContacts();
   loadFamilies();
   refreshAcCache();
@@ -1116,6 +1329,66 @@ window.deleteSelected = async function() {
   refreshAcCache();
 };
 
+window.editContact = function(id) {
+  closeEditContact();
+  var c = cachedContacts.find(x => x.id === id);
+  if (!c) return;
+  var row = document.getElementById('contact-row-' + id);
+  if (!row) return;
+
+  // Build family options from the existing dropdown
+  var famOptions = '<option value="">No family</option>';
+  cachedFamilies.forEach(function(f) {
+    var sel = (c.family_name && f.name === c.family_name) ? ' selected' : '';
+    famOptions += '<option value="' + f.id + '"' + sel + '>' + esc(f.name) + '</option>';
+  });
+
+  var dd = document.createElement('div');
+  dd.className = 'contact-edit-dropdown';
+  dd.id = 'contact-edit-dd';
+  dd.innerHTML =
+    '<div class="edit-row">' +
+      '<input type="text" id="ce-name" value="' + esc(c.name).replace(/"/g, '&quot;') + '" placeholder="Name">' +
+      '<input type="text" id="ce-email" value="' + esc(c.email).replace(/"/g, '&quot;') + '" placeholder="Email">' +
+    '</div>' +
+    '<div class="edit-row">' +
+      '<select id="ce-category"><option value="Single"' + (c.category === 'Single' ? ' selected' : '') + '>Single</option><option value="Family"' + (c.category === 'Family' ? ' selected' : '') + '>Family</option></select>' +
+      '<select id="ce-family">' + famOptions + '</select>' +
+    '</div>' +
+    '<div class="edit-actions">' +
+      '<button class="btn btn-sm" onclick="closeEditContact()">Cancel</button>' +
+      '<button class="btn btn-primary btn-sm" onclick="saveEditContact(' + id + ')">Save</button>' +
+    '</div>';
+  dd.onclick = function(e) { e.stopPropagation(); };
+  row.appendChild(dd);
+
+  // Delay overlay show to next frame so the current click doesn't immediately close it
+  requestAnimationFrame(function() {
+    document.getElementById('contact-edit-overlay').classList.add('show');
+  });
+  document.getElementById('ce-name').focus();
+};
+
+window.saveEditContact = async function(id) {
+  var name = document.getElementById('ce-name').value.trim();
+  var email = document.getElementById('ce-email').value.trim();
+  var category = document.getElementById('ce-category').value;
+  var familyId = document.getElementById('ce-family').value || null;
+  if (!name || !email) { showToast('Enter both name and email.', 'error'); return; }
+  var res = await pywebview.api.update_contact(id, name, email, category, familyId);
+  if (!res.ok) { showToast(res.error, 'error'); return; }
+  closeEditContact();
+  loadContacts();
+  loadFamilies();
+  refreshAcCache();
+};
+
+window.closeEditContact = function() {
+  var dd = document.getElementById('contact-edit-dd');
+  if (dd) dd.remove();
+  document.getElementById('contact-edit-overlay').classList.remove('show');
+};
+
 // ══════════════════════════════════════════════════════════════════════════════
 // FAMILIES
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1124,12 +1397,6 @@ var cachedFamilies = [];
 async function loadFamilies() {
   await waitForApi();
   cachedFamilies = await pywebview.api.get_families();
-
-  // Update family dropdown in contacts form
-  const sel = document.getElementById('c-family');
-  sel.innerHTML = '<option value="">No family</option>' +
-    cachedFamilies.map(f => `<option value="${f.id}">${esc(f.name)}</option>`).join('');
-
   renderFamilyList(cachedFamilies);
 }
 
@@ -1141,8 +1408,11 @@ function renderFamilyList(families) {
     return `
       <div class="family-card">
         <div class="fam-header">
-          <span class="fam-name">${esc(f.name)}</span>
-          <button class="btn btn-danger btn-sm" onclick="deleteFamily(${f.id})">Delete</button>
+          <span class="fam-name" id="fam-name-${f.id}">${esc(f.name)}</span>
+          <span>
+            <button class="contact-edit-btn" onclick="editFamily(${f.id})" title="Edit">&#9998;</button>
+            <button class="btn btn-danger btn-sm" onclick="deleteFamily(${f.id})">Delete</button>
+          </span>
         </div>
         <div class="fam-members">${members}</div>
       </div>
@@ -1160,15 +1430,129 @@ window.filterFamilies = function() {
   renderFamilyList(filtered);
 };
 
-window.createFamily = async function() {
-  const name = document.getElementById('f-name').value.trim();
+window.openCreateFamily = function() {
+  showCreateModal(
+    '<h3>New Family</h3>' +
+    '<input type="text" id="cm-fname" placeholder="Family Name">' +
+    '<div class="edit-actions"><button class="btn btn-sm" onclick="closeCreateModal()">Cancel</button><button class="btn btn-primary btn-sm" onclick="submitCreateFamily()">Add</button></div>'
+  );
+  document.getElementById('cm-fname').focus();
+};
+
+window.submitCreateFamily = async function() {
+  var name = document.getElementById('cm-fname').value.trim();
   if (!name) { showToast('Enter a family name.', 'error'); return; }
-
-  const res = await pywebview.api.add_family(name);
+  var res = await pywebview.api.add_family(name);
   if (!res.ok) { showToast(res.error || 'Family already exists.', 'error'); return; }
-
-  document.getElementById('f-name').value = '';
+  closeCreateModal();
   loadFamilies();
+  refreshAcCache();
+};
+
+// ── Family edit modal ──
+var _efFamilyId = null;
+var _efOriginalMembers = [];
+var _efPendingRemoves = [];
+var _efPendingAdds = [];
+
+window.editFamily = function(id) {
+  var family = cachedFamilies.find(f => f.id === id);
+  if (!family) return;
+  _efFamilyId = id;
+  _efOriginalMembers = family.members.slice();
+  _efPendingRemoves = [];
+  _efPendingAdds = [];
+  showCreateModal(
+    '<h3>Edit Family</h3>' +
+    '<input type="text" id="ef-name" value="' + esc(family.name).replace(/"/g, '&quot;') + '" placeholder="Family Name">' +
+    '<div class="edit-section-label">Members</div>' +
+    '<div class="edit-member-list" id="ef-members"></div>' +
+    '<div class="edit-section-label">Add Members</div>' +
+    '<input type="text" id="ef-search" placeholder="Search contacts..." oninput="efSearchContacts()" style="padding:7px 10px;font-size:13px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);width:100%;box-sizing:border-box;">' +
+    '<div class="edit-search-results" id="ef-search-results"></div>' +
+    '<div class="edit-actions"><button class="btn btn-sm" onclick="closeCreateModal()">Cancel</button><button class="btn btn-primary btn-sm" onclick="saveEditFamily()">Save</button></div>'
+  );
+  efRenderMembers();
+  document.getElementById('ef-search-results').innerHTML = '';
+};
+
+window.efRenderMembers = function() {
+  var el = document.getElementById('ef-members');
+  var current = _efOriginalMembers.filter(m => _efPendingRemoves.indexOf(m.id) === -1);
+  var all = current.concat(_efPendingAdds);
+  if (!all.length) { el.innerHTML = '<span style="font-size:11px;color:var(--text-muted);">No members</span>'; return; }
+  el.innerHTML = all.map(function(m) {
+    var isNew = _efPendingAdds.some(a => a.id === m.id);
+    return '<span class="edit-member-pill">' + esc(m.name) +
+      ' <span class="remove-x" onclick="efRemoveMember(' + m.id + ',' + (isNew ? 'true' : 'false') + ')">&times;</span></span>';
+  }).join('');
+};
+
+window.efRemoveMember = function(memberId, isNew) {
+  if (isNew) {
+    _efPendingAdds = _efPendingAdds.filter(a => a.id !== memberId);
+  } else {
+    if (_efPendingRemoves.indexOf(memberId) === -1) _efPendingRemoves.push(memberId);
+  }
+  efRenderMembers();
+  efSearchContacts();
+};
+
+window.efSearchContacts = function() {
+  var el = document.getElementById('ef-search-results');
+  var q = document.getElementById('ef-search').value.toLowerCase().trim();
+  if (!q) { el.innerHTML = ''; return; }
+  var currentIds = _efOriginalMembers.filter(m => _efPendingRemoves.indexOf(m.id) === -1).map(m => m.id);
+  var addedIds = _efPendingAdds.map(a => a.id);
+  var exclude = currentIds.concat(addedIds);
+  var matches = cachedContacts.filter(function(c) {
+    if (exclude.indexOf(c.id) !== -1) return false;
+    return c.name.toLowerCase().includes(q) || c.email.toLowerCase().includes(q);
+  }).slice(0, 10);
+  if (!matches.length) { el.innerHTML = '<div class="esr-item" style="color:var(--text-muted);cursor:default;">No matches</div>'; return; }
+  el.innerHTML = matches.map(function(c) {
+    return '<div class="esr-item" onclick="efAddContact(' + c.id + ')">' + esc(c.name) + '<span class="esr-email">' + esc(c.email) + '</span></div>';
+  }).join('');
+};
+
+window.efAddContact = function(contactId) {
+  var c = cachedContacts.find(x => x.id === contactId);
+  if (!c) return;
+  var wasOriginal = _efOriginalMembers.some(m => m.id === contactId);
+  if (wasOriginal) {
+    _efPendingRemoves = _efPendingRemoves.filter(id => id !== contactId);
+  } else {
+    if (!_efPendingAdds.some(a => a.id === contactId)) {
+      _efPendingAdds.push({id: c.id, name: c.name, email: c.email});
+    }
+  }
+  efRenderMembers();
+  document.getElementById('ef-search').value = '';
+  document.getElementById('ef-search-results').innerHTML = '';
+};
+
+window.saveEditFamily = async function() {
+  var newName = document.getElementById('ef-name').value.trim();
+  if (!newName) { showToast('Family name cannot be empty.', 'error'); return; }
+  var family = cachedFamilies.find(f => f.id === _efFamilyId);
+  if (family && newName !== family.name) {
+    var res = await pywebview.api.rename_family(_efFamilyId, newName);
+    if (!res.ok) { showToast(res.error || 'Rename failed.', 'error'); return; }
+  }
+  // Remove members from family (set to Single, no family)
+  for (var i = 0; i < _efPendingRemoves.length; i++) {
+    var rm = cachedContacts.find(x => x.id === _efPendingRemoves[i]);
+    if (rm) await pywebview.api.update_contact(rm.id, rm.name, rm.email, 'Single', null);
+  }
+  // Add members to family (set to Family category with this family_id)
+  for (var j = 0; j < _efPendingAdds.length; j++) {
+    var ad = _efPendingAdds[j];
+    var contact = cachedContacts.find(x => x.id === ad.id);
+    if (contact) await pywebview.api.update_contact(contact.id, contact.name, contact.email, 'Family', _efFamilyId);
+  }
+  closeCreateModal();
+  loadFamilies();
+  loadContacts();
   refreshAcCache();
 };
 
@@ -1197,10 +1581,6 @@ window.switchTab = function(tab) {
   if (tab === 'history') loadHistory();
 };
 
-window.onCategoryChange = function() {
-  const cat = document.getElementById('c-category').value;
-  document.getElementById('c-family').disabled = (cat !== 'Family');
-};
 
 // ══════════════════════════════════════════════════════════════════════════════
 // EMAIL DISPATCH
@@ -1596,19 +1976,8 @@ var cachedGroups = [];
 async function loadGroups() {
   await waitForApi();
   cachedGroups = await pywebview.api.get_groups();
-  const contacts = await pywebview.api.get_contacts();
 
   renderGroupList(cachedGroups);
-
-  // Update group select dropdown
-  const gsel = document.getElementById('g-select');
-  gsel.innerHTML = '<option value="">Select group</option>' +
-    cachedGroups.map(g => '<option value="' + g.id + '">' + esc(g.name) + '</option>').join('');
-
-  // Update contact select dropdown
-  const csel = document.getElementById('g-contact');
-  csel.innerHTML = '<option value="">Select contact</option>' +
-    contacts.map(c => '<option value="' + c.id + '">' + esc(c.name) + '</option>').join('');
 
   // Update target selector with group options
   const tsel = document.getElementById('target-select');
@@ -1624,12 +1993,11 @@ function renderGroupList(groups) {
   } else {
     el.innerHTML = groups.map(g => {
       const members = g.members.length
-        ? g.members.map(m => '<span style="display:inline-flex;align-items:center;gap:2px;">' + esc(m.name) +
-            ' <span style="cursor:pointer;color:var(--danger);font-size:10px;" onclick="removeMember(' + g.id + ',' + m.id + ')">&times;</span></span>').join(', ')
+        ? g.members.map(m => esc(m.name)).join(', ')
         : 'No members';
       return renderCard(
         esc(g.name),
-        '<button class="btn btn-danger btn-sm" onclick="deleteGroup(' + g.id + ')">Delete</button>',
+        '<span><button class="contact-edit-btn" onclick="editGroup(' + g.id + ')" title="Edit">&#9998;</button> <button class="btn btn-danger btn-sm" onclick="deleteGroup(' + g.id + ')">Delete</button></span>',
         members
       );
     }).join('');
@@ -1646,12 +2014,59 @@ window.filterGroups = function() {
   renderGroupList(filtered);
 };
 
-window.createGroup = async function() {
-  const name = document.getElementById('g-name').value.trim();
+window.openCreateGroup = function() {
+  var contactOpts = '<option value="">Select contact</option>';
+  cachedContacts.forEach(function(c) {
+    contactOpts += '<option value="' + c.id + '">' + esc(c.name) + ' (' + esc(c.email) + ')</option>';
+  });
+  var famOpts = '<option value="">Select family</option>';
+  cachedFamilies.forEach(function(f) {
+    famOpts += '<option value="' + f.id + '">' + esc(f.name) + ' (' + f.members.length + ' members)</option>';
+  });
+  showCreateModal(
+    '<h3>New Group</h3>' +
+    '<input type="text" id="cm-gname" placeholder="Group Name">' +
+    '<div style="border-top:1px solid var(--border);margin-top:4px;padding-top:8px;">' +
+      '<div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">Add members (optional):</div>' +
+      '<div class="edit-row">' +
+        '<select id="cm-add-type" onchange="cmGroupTypeChange()" style="width:auto;"><option value="contact">Contact</option><option value="family">Family</option></select>' +
+        '<select id="cm-g-contact">' + contactOpts + '</select>' +
+        '<select id="cm-g-family" style="display:none;">' + famOpts + '</select>' +
+      '</div>' +
+      '<div id="cm-g-members" style="margin-top:4px;font-size:11px;color:var(--text-muted);"></div>' +
+    '</div>' +
+    '<div class="edit-actions"><button class="btn btn-sm" onclick="closeCreateModal()">Cancel</button><button class="btn btn-primary btn-sm" onclick="submitCreateGroup()">Add</button></div>'
+  );
+  document.getElementById('cm-gname').focus();
+};
+
+var _cmGroupMembers = [];
+window.cmGroupTypeChange = function() {
+  var t = document.getElementById('cm-add-type').value;
+  document.getElementById('cm-g-contact').style.display = t === 'contact' ? '' : 'none';
+  document.getElementById('cm-g-family').style.display = t === 'family' ? '' : 'none';
+};
+
+window.submitCreateGroup = async function() {
+  var name = document.getElementById('cm-gname').value.trim();
   if (!name) { showToast('Enter a group name.', 'error'); return; }
-  const res = await pywebview.api.add_group(name);
+  var res = await pywebview.api.add_group(name);
   if (!res.ok) { showToast(res.error || 'Group already exists.', 'error'); return; }
-  document.getElementById('g-name').value = '';
+  // Get the new group's id by reloading
+  var groups = await pywebview.api.get_groups();
+  var newGroup = groups.find(function(g) { return g.name === name; });
+  if (newGroup) {
+    // Add selected member
+    var addType = document.getElementById('cm-add-type').value;
+    if (addType === 'family') {
+      var fid = document.getElementById('cm-g-family').value;
+      if (fid) await pywebview.api.add_family_to_group(newGroup.id, parseInt(fid));
+    } else {
+      var cid = document.getElementById('cm-g-contact').value;
+      if (cid) await pywebview.api.add_group_member(newGroup.id, parseInt(cid));
+    }
+  }
+  closeCreateModal();
   loadGroups();
   refreshAcCache();
 };
@@ -1663,53 +2078,270 @@ window.deleteGroup = async function(id) {
   refreshAcCache();
 };
 
-window.addMemberToGroup = async function() {
-  const gid = document.getElementById('g-select').value;
-  const cid = document.getElementById('g-contact').value;
-  if (!gid || !cid) { showToast('Select both a group and a contact.', 'error'); return; }
-  const res = await pywebview.api.add_group_member(parseInt(gid), parseInt(cid));
-  if (!res.ok) { showToast(res.error, 'error'); return; }
-  loadGroups();
+// ── Group edit modal ──
+var _egGroupId = null;
+var _egOriginalMembers = [];
+var _egPendingRemoves = [];
+var _egPendingAdds = [];
+
+window.editGroup = function(id) {
+  var group = cachedGroups.find(g => g.id === id);
+  if (!group) return;
+  _egGroupId = id;
+  _egOriginalMembers = group.members.slice();
+  _egPendingRemoves = [];
+  _egPendingAdds = [];
+  showCreateModal(
+    '<h3>Edit Group</h3>' +
+    '<input type="text" id="eg-name" value="' + esc(group.name).replace(/"/g, '&quot;') + '" placeholder="Group Name">' +
+    '<div class="edit-section-label">Members</div>' +
+    '<div class="edit-member-list" id="eg-members"></div>' +
+    '<div class="edit-section-label">Add Members</div>' +
+    '<input type="text" id="eg-search" placeholder="Search contacts..." oninput="egSearchContacts()" style="padding:7px 10px;font-size:13px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);width:100%;box-sizing:border-box;">' +
+    '<div class="edit-search-results" id="eg-search-results"></div>' +
+    '<div class="edit-actions"><button class="btn btn-sm" onclick="closeCreateModal()">Cancel</button><button class="btn btn-primary btn-sm" onclick="saveEditGroup()">Save</button></div>'
+  );
+  egRenderMembers();
+  document.getElementById('eg-search-results').innerHTML = '';
 };
 
-window.removeMember = async function(gid, cid) {
-  await pywebview.api.remove_group_member(gid, cid);
+window.egRenderMembers = function() {
+  var el = document.getElementById('eg-members');
+  var current = _egOriginalMembers.filter(m => _egPendingRemoves.indexOf(m.id) === -1);
+  var all = current.concat(_egPendingAdds);
+  if (!all.length) { el.innerHTML = '<span style="font-size:11px;color:var(--text-muted);">No members</span>'; return; }
+  el.innerHTML = all.map(function(m) {
+    var isNew = _egPendingAdds.some(a => a.id === m.id);
+    return '<span class="edit-member-pill">' + esc(m.name) +
+      ' <span class="remove-x" onclick="egRemoveMember(' + m.id + ',' + (isNew ? 'true' : 'false') + ')">&times;</span></span>';
+  }).join('');
+};
+
+window.egRemoveMember = function(memberId, isNew) {
+  if (isNew) {
+    _egPendingAdds = _egPendingAdds.filter(a => a.id !== memberId);
+  } else {
+    if (_egPendingRemoves.indexOf(memberId) === -1) _egPendingRemoves.push(memberId);
+  }
+  egRenderMembers();
+  egSearchContacts();
+};
+
+window.egSearchContacts = function() {
+  var el = document.getElementById('eg-search-results');
+  var q = document.getElementById('eg-search').value.toLowerCase().trim();
+  if (!q) { el.innerHTML = ''; return; }
+  var currentIds = _egOriginalMembers.filter(m => _egPendingRemoves.indexOf(m.id) === -1).map(m => m.id);
+  var addedIds = _egPendingAdds.map(a => a.id);
+  var exclude = currentIds.concat(addedIds);
+  var matches = cachedContacts.filter(function(c) {
+    if (exclude.indexOf(c.id) !== -1) return false;
+    return c.name.toLowerCase().includes(q) || c.email.toLowerCase().includes(q);
+  }).slice(0, 10);
+  if (!matches.length) { el.innerHTML = '<div class="esr-item" style="color:var(--text-muted);cursor:default;">No matches</div>'; return; }
+  el.innerHTML = matches.map(function(c) {
+    return '<div class="esr-item" onclick="egAddContact(' + c.id + ')">' + esc(c.name) + '<span class="esr-email">' + esc(c.email) + '</span></div>';
+  }).join('');
+};
+
+window.egAddContact = function(contactId) {
+  var c = cachedContacts.find(x => x.id === contactId);
+  if (!c) return;
+  // If it was a removed original member, un-remove it
+  var wasOriginal = _egOriginalMembers.some(m => m.id === contactId);
+  if (wasOriginal) {
+    _egPendingRemoves = _egPendingRemoves.filter(id => id !== contactId);
+  } else {
+    if (!_egPendingAdds.some(a => a.id === contactId)) {
+      _egPendingAdds.push({id: c.id, name: c.name, email: c.email});
+    }
+  }
+  egRenderMembers();
+  document.getElementById('eg-search').value = '';
+  document.getElementById('eg-search-results').innerHTML = '';
+};
+
+window.saveEditGroup = async function() {
+  var newName = document.getElementById('eg-name').value.trim();
+  if (!newName) { showToast('Group name cannot be empty.', 'error'); return; }
+  var group = cachedGroups.find(g => g.id === _egGroupId);
+  if (group && newName !== group.name) {
+    var res = await pywebview.api.rename_group(_egGroupId, newName);
+    if (!res.ok) { showToast(res.error || 'Rename failed.', 'error'); return; }
+  }
+  for (var i = 0; i < _egPendingRemoves.length; i++) {
+    await pywebview.api.remove_group_member(_egGroupId, _egPendingRemoves[i]);
+  }
+  for (var j = 0; j < _egPendingAdds.length; j++) {
+    await pywebview.api.add_group_member(_egGroupId, _egPendingAdds[j].id);
+  }
+  closeCreateModal();
   loadGroups();
+  loadContacts();
+  refreshAcCache();
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
 // SCHEDULED EMAILS
 // ══════════════════════════════════════════════════════════════════════════════
 
+var schedMonth = new Date().getMonth();
+var schedYear = new Date().getFullYear();
+var _schedEmails = [];
+
 async function loadScheduled() {
   await waitForApi();
-  const emails = await pywebview.api.get_scheduled_emails();
-  const el = document.getElementById('scheduled-list');
-  if (!emails.length) { renderEmpty(el, 'No scheduled emails.'); return; }
-  el.innerHTML = emails.map(e => {
-    const statusColor = e.status === 'sent' ? 'var(--success)' : e.status === 'pending' ? 'var(--accent)' : 'var(--danger)';
-    const cancelBtn = e.status === 'pending'
-      ? ' <button class="btn btn-danger btn-sm" onclick="cancelScheduled(' + e.id + ')">Cancel</button>'
-      : '';
-    let recLabel = '';
-    if (e.recurrence && e.recurrence.type !== 'once') {
-      const dayNames = ['Su','Mo','Tu','We','Th','Fr','Sa'];
-      let detail = e.recurrence.type.replace(/_/g, ' ');
-      if (e.recurrence.days && e.recurrence.days.length) {
-        detail += ' (' + e.recurrence.days.map(d => dayNames[d]).join(', ') + ')';
-      }
-      if (e.recurrence.day_of_month) detail += ' (day ' + e.recurrence.day_of_month + ')';
-      if (e.recurrence.end_date) detail += ' until ' + e.recurrence.end_date.split('T')[0];
-      recLabel = ' | Repeat: ' + detail;
-    }
-    return renderCard(
-      esc(e.subject),
-      '<span style="font-size:11px;color:' + statusColor + '">' + e.status.toUpperCase() + '</span>',
-      'Target: ' + esc(e.target_type) + ' | Scheduled: ' + esc(e.scheduled_at) +
-        recLabel + (e.sent_at ? ' | Sent: ' + esc(e.sent_at) : '') + cancelBtn
-    );
-  }).join('');
+  _schedEmails = await pywebview.api.get_scheduled_emails_with_recipients();
+  renderScheduleCalendar();
 }
+
+function renderScheduleCalendar() {
+  const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  document.getElementById('sched-month-label').textContent = monthNames[schedMonth] + ' ' + schedYear;
+  const el = document.getElementById('scheduled-calendar');
+
+  const daysInMonth = new Date(schedYear, schedMonth + 1, 0).getDate();
+  const today = new Date(); today.setHours(0,0,0,0);
+  const todayKey = today.getFullYear() + '-' + String(today.getMonth()+1).padStart(2,'0') + '-' + String(today.getDate()).padStart(2,'0');
+
+  // Group emails by date
+  const byDate = {};
+  _schedEmails.forEach(function(e) {
+    const key = e.scheduled_at.split('T')[0];
+    if (!byDate[key]) byDate[key] = [];
+    byDate[key].push(e);
+  });
+
+  var html = '';
+  for (var day = 1; day <= daysInMonth; day++) {
+    var d = new Date(schedYear, schedMonth, day);
+    var key = schedYear + '-' + String(schedMonth+1).padStart(2,'0') + '-' + String(day).padStart(2,'0');
+    var isToday = key === todayKey;
+    var label = dayNames[d.getDay()] + ', ' + monthNames[schedMonth].substring(0,3) + ' ' + day;
+    var dayEmails = byDate[key] || [];
+
+    html += '<div class="sched-day-row' + (isToday ? ' sched-day-today' : '') + '" id="sched-day-' + key + '">';
+    html += '<div class="sched-day-header"><span class="sched-day-label">' + label + (isToday ? ' (Today)' : '') + '</span>';
+    html += '<button class="sched-add-btn" style="width:auto;margin:0;padding:2px 8px;font-size:14px;" onclick="scheduleNewForDate(\'' + key + '\')" title="Schedule email for this day">+</button>';
+    html += '</div>';
+
+    if (dayEmails.length) {
+      html += '<div class="sched-day-cards">';
+      dayEmails.forEach(function(e) {
+        var statusColor = e.status === 'sent' ? 'var(--success)' : e.status === 'pending' ? 'var(--accent)' : 'var(--danger)';
+        var time = (e.scheduled_at.split('T')[1] || '').substring(0, 5);
+        var recipNames = e.recipients.map(function(r) { return r.name || r.email; });
+        var recipShort = recipNames.length <= 2 ? recipNames.join(', ') : recipNames.slice(0,2).join(', ') + ' +' + (recipNames.length - 2) + ' more';
+        var cancelBtn = e.status === 'pending' ? '<button class="btn btn-danger btn-sm" style="font-size:10px;padding:1px 6px;margin-left:6px;" onclick="event.stopPropagation();cancelScheduled(' + e.id + ')">Cancel</button>' : '';
+
+        // Recurrence label
+        var recInfo = '';
+        if (e.recurrence && e.recurrence.type !== 'once') {
+          var dn = ['Su','Mo','Tu','We','Th','Fr','Sa'];
+          recInfo = e.recurrence.type.replace(/_/g, ' ');
+          if (e.recurrence.days && e.recurrence.days.length) recInfo += ' (' + e.recurrence.days.map(function(d){return dn[d];}).join(', ') + ')';
+          if (e.recurrence.day_of_month) recInfo += ' (day ' + e.recurrence.day_of_month + ')';
+          if (e.recurrence.end_date) recInfo += ' until ' + e.recurrence.end_date.split('T')[0];
+        }
+
+        // Tooltip content
+        var fullRecip = e.recipients.map(function(r) { return r.name ? esc(r.name) + ' &lt;' + esc(r.email) + '&gt;' : esc(r.email); }).join('<br>');
+        var tipHtml = '<strong>Recipients (' + e.recipients.length + '):</strong><br>' + (fullRecip || '<em>None resolved</em>');
+        if (recInfo) tipHtml += '<br><br><strong>Recurrence:</strong> ' + esc(recInfo);
+        if (e.sent_at) tipHtml += '<br><strong>Sent at:</strong> ' + esc(e.sent_at);
+        if (e.result) tipHtml += '<br><strong>Result:</strong> ' + esc(typeof e.result === 'string' ? e.result : JSON.stringify(e.result));
+
+        var clickable = e.status !== 'pending';
+        var clickAttr = clickable ? ' clickable" onclick="showEmailPreview(' + e.id + ')"' : '"';
+        html += '<div class="sched-email-card' + (clickable ? ' clickable' : '') + '" data-status="' + e.status + '"' + (clickable ? ' onclick="showEmailPreview(' + e.id + ')"' : '') + '>';
+        html += '<div class="sched-card-subject">' + esc(e.subject) + '</div>';
+        html += '<div class="sched-card-meta">';
+        html += '<span>' + esc(time) + '</span>';
+        html += '<span class="sched-card-status" style="color:' + statusColor + '">' + e.status + '</span>';
+        html += '<span>' + esc(recipShort) + '</span>';
+        html += cancelBtn;
+        html += '</div>';
+        html += '<div class="sched-tooltip">' + tipHtml + '</div>';
+        html += '</div>';
+      });
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+
+  el.innerHTML = html;
+
+  // Scroll to today if viewing current month
+  if (schedMonth === today.getMonth() && schedYear === today.getFullYear()) {
+    var todayEl = document.getElementById('sched-day-' + todayKey);
+    if (todayEl) todayEl.scrollIntoView({ behavior: 'auto', block: 'start' });
+  }
+}
+
+window.schedChangeMonth = function(delta) {
+  schedMonth += delta;
+  if (schedMonth > 11) { schedMonth = 0; schedYear++; }
+  if (schedMonth < 0) { schedMonth = 11; schedYear--; }
+  renderScheduleCalendar();
+};
+
+window.scheduleNewForDate = function(dateStr) {
+  clearComposer();
+  var dt = dateStr + 'T09:00';
+  document.getElementById('sched-datetime').value = dt;
+  document.getElementById('subject').focus();
+};
+
+function setComposerDisabled(disabled) {
+  var btns = [document.getElementById('btn-save-template'), document.getElementById('btn-schedule'), document.getElementById('btn-send-now')];
+  btns.forEach(function(b) {
+    if (!b) return;
+    b.disabled = disabled;
+    b.style.opacity = disabled ? '0.4' : '';
+    b.style.pointerEvents = disabled ? 'none' : '';
+  });
+}
+
+function clearComposer() {
+  document.getElementById('subject').value = '';
+  quill.setText('');
+  recipientList = [];
+  renderRecipients();
+  document.getElementById('sched-datetime').value = '';
+  document.getElementById('recurrence-type').value = 'once';
+  if (window.onRecurrenceChange) onRecurrenceChange();
+  document.getElementById('recurrence-end-date').value = '';
+  attachedFiles = [];
+  renderAttachChips();
+  document.getElementById('template-select').value = '';
+  document.getElementById('target-select').value = '';
+  setComposerDisabled(false);
+}
+
+window.showEmailPreview = async function(emailId) {
+  var detail = await pywebview.api.get_scheduled_email_detail(emailId);
+  if (!detail) return;
+  // Fill subject
+  document.getElementById('subject').value = detail.subject || '';
+  // Fill editor body
+  if (detail.html_body) {
+    quill.root.innerHTML = detail.html_body;
+  } else {
+    quill.setText(detail.plain_text || '');
+  }
+  // Fill recipients
+  recipientList = detail.recipients.map(function(r) {
+    return { type: 'email', value: r.email, label: r.name ? r.name + ' <' + r.email + '>' : r.email };
+  });
+  renderRecipients();
+  // Fill schedule datetime
+  if (detail.scheduled_at) {
+    document.getElementById('sched-datetime').value = detail.scheduled_at.substring(0, 16);
+  }
+  // Disable action buttons
+  setComposerDisabled(true);
+};
 
 // ── Recurrence controls ──
 

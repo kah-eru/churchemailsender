@@ -160,6 +160,16 @@ def get_families():
         conn.close()
 
 
+def rename_family(family_id, new_name):
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE families SET name = ? WHERE id = ?", (new_name, family_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def delete_family(family_id):
     conn = get_connection()
     try:
@@ -216,6 +226,17 @@ def get_contacts_by_family(family_id):
         conn.close()
 
 
+def update_contact(contact_id, name, email, category, family_id=None):
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE roster SET name = ?, email = ?, category = ?, family_id = ? WHERE id = ?",
+                       (name, email, category, family_id, contact_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def delete_contact(contact_id):
     conn = get_connection()
     try:
@@ -244,6 +265,16 @@ def get_groups():
         cursor = conn.cursor()
         cursor.execute("SELECT id, name FROM groups_ ORDER BY name")
         return cursor.fetchall()
+    finally:
+        conn.close()
+
+
+def rename_group(group_id, new_name):
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE groups_ SET name = ? WHERE id = ?", (new_name, group_id))
+        conn.commit()
     finally:
         conn.close()
 
@@ -318,8 +349,18 @@ def get_scheduled_emails():
     conn = get_connection()
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT id, subject, target_type, target_id, scheduled_at, status, sent_at, result, recurrence FROM scheduled_emails ORDER BY scheduled_at DESC")
+        cursor.execute("SELECT id, subject, target_type, target_id, scheduled_at, status, sent_at, result, recurrence, contact_ids, manual_emails FROM scheduled_emails ORDER BY scheduled_at ASC")
         return cursor.fetchall()
+    finally:
+        conn.close()
+
+
+def get_scheduled_email_by_id(email_id):
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, subject, html_body, plain_text, target_type, target_id, contact_ids, attachment_paths, scheduled_at, status, sent_at, result, recurrence, manual_emails FROM scheduled_emails WHERE id = ?", (email_id,))
+        return cursor.fetchone()
     finally:
         conn.close()
 
