@@ -61,6 +61,23 @@ def init_db():
         """)
 
         cursor.execute("""
+            CREATE TABLE IF NOT EXISTS family_members (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                family_id INTEGER NOT NULL,
+                contact_id INTEGER NOT NULL,
+                FOREIGN KEY (family_id) REFERENCES families(id) ON DELETE CASCADE,
+                FOREIGN KEY (contact_id) REFERENCES roster(id) ON DELETE CASCADE,
+                UNIQUE (family_id, contact_id)
+            )
+        """)
+
+        # Migration: copy existing roster.family_id into family_members
+        cursor.execute("""
+            INSERT OR IGNORE INTO family_members (family_id, contact_id)
+            SELECT family_id, id FROM roster WHERE family_id IS NOT NULL
+        """)
+
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS scheduled_emails (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 subject TEXT NOT NULL,
@@ -219,6 +236,81 @@ def get_contacts_by_family(family_id):
             FROM roster r
             LEFT JOIN families f ON r.family_id = f.id
             WHERE r.family_id = ?
+            ORDER BY r.name
+        """, (family_id,))
+        return cursor.fetchall()
+    finally:
+        conn.close()
+
+
+def get_contact_groups():
+    """Returns a dict mapping contact_id -> list of group names."""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT gm.contact_id, g.name
+            FROM group_members gm
+            JOIN groups_ g ON gm.group_id = g.id
+            ORDER BY g.name
+        """)
+        result = {}
+        for cid, gname in cursor.fetchall():
+            result.setdefault(cid, []).append(gname)
+        return result
+    finally:
+        conn.close()
+
+
+def get_contact_families():
+    """Returns a dict mapping contact_id -> list of {id, name}."""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT fm.contact_id, f.id, f.name
+            FROM family_members fm
+            JOIN families f ON fm.family_id = f.id
+            ORDER BY f.name
+        """)
+        result = {}
+        for cid, fid, fname in cursor.fetchall():
+            result.setdefault(cid, []).append({"id": fid, "name": fname})
+        return result
+    finally:
+        conn.close()
+
+
+def add_family_member(family_id, contact_id):
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR IGNORE INTO family_members (family_id, contact_id) VALUES (?, ?)", (family_id, contact_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def remove_family_member(family_id, contact_id):
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM family_members WHERE family_id = ? AND contact_id = ?", (family_id, contact_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_family_members_via_junction(family_id):
+    """Get family members via the family_members junction table."""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT r.id, r.name, r.email
+            FROM family_members fm
+            JOIN roster r ON fm.contact_id = r.id
+            WHERE fm.family_id = ?
             ORDER BY r.name
         """, (family_id,))
         return cursor.fetchall()

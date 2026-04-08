@@ -25,8 +25,11 @@ import db_manager
 class Api:
     def get_contacts(self):
         rows = db_manager.get_contacts()
+        group_map = db_manager.get_contact_groups()
+        family_map = db_manager.get_contact_families()
         return [
-            {"id": r[0], "name": r[1], "email": r[2], "category": r[3], "family_name": r[4]}
+            {"id": r[0], "name": r[1], "email": r[2], "category": r[3], "family_name": r[4],
+             "families": family_map.get(r[0], []), "groups": group_map.get(r[0], [])}
             for r in rows
         ]
 
@@ -55,13 +58,24 @@ class Api:
         families = db_manager.get_families()
         result = []
         for fid, fname in families:
-            members = db_manager.get_contacts_by_family(fid)
+            members = db_manager.get_family_members_via_junction(fid)
             result.append({
                 "id": fid,
                 "name": fname,
                 "members": [{"id": m[0], "name": m[1], "email": m[2]} for m in members],
             })
         return result
+
+    def add_family_member(self, family_id, contact_id):
+        try:
+            db_manager.add_family_member(int(family_id), int(contact_id))
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def remove_family_member(self, family_id, contact_id):
+        db_manager.remove_family_member(int(family_id), int(contact_id))
+        return {"ok": True}
 
     def add_family(self, name):
         try:
@@ -98,6 +112,12 @@ class Api:
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    def get_ui_setting(self, key):
+        return db_manager.get_setting("ui_" + key) or ""
+
+    def set_ui_setting(self, key, value):
+        db_manager.set_setting("ui_" + key, value)
 
     def save_timezone(self, timezone):
         try:
@@ -571,15 +591,32 @@ HTML = r"""<!DOCTYPE html>
     background: var(--bg); color: var(--text); height: 100vh; overflow: hidden;
     transition: background 0.2s, color 0.2s;
   }
-  .app { display: flex; height: 100vh; gap: 8px; padding: 10px; }
+  .app { display: flex; height: 100vh; padding: 10px; gap: 0; }
 
   /* ── Panels ── */
   .left-panel, .right-panel {
     background: var(--panel); border-radius: 10px; padding: 16px; display: flex; flex-direction: column;
     transition: background 0.2s;
+    min-width: 300px; overflow: hidden;
   }
-  .left-panel { flex: 1; min-width: 420px; }
-  .right-panel { flex: 1; min-width: 420px; overflow: hidden; }
+  .left-panel { flex: 1 1 50%; }
+  .right-panel { flex: 1 1 50%; }
+
+  /* ── Resize divider ── */
+  .panel-divider {
+    width: 12px; flex-shrink: 0; cursor: col-resize; position: relative;
+    display: flex; align-items: center; justify-content: center;
+    -webkit-user-select: none; user-select: none; z-index: 10;
+    touch-action: none; -webkit-app-region: no-drag;
+  }
+  .panel-divider::after {
+    content: ''; display: block; width: 3px; height: 40px; border-radius: 2px;
+    background: var(--border); transition: background 0.15s, height 0.15s;
+    pointer-events: none;
+  }
+  .panel-divider:hover::after, .panel-divider.dragging::after {
+    background: var(--accent); height: 60px;
+  }
 
   /* ── Tabs ── */
   .tab-bar { display: flex; gap: 4px; margin-bottom: 12px; }
@@ -634,48 +671,70 @@ HTML = r"""<!DOCTYPE html>
   .contact-row { position: relative; }
   .contact-row:hover { background: var(--row-hover); }
   .contact-row input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
-  .contact-row .name { flex: 1; font-weight: 500; }
-  .contact-row .email { flex: 1; color: var(--text-muted); }
-  .contact-row .cat { width: 24px; font-size: 14px; color: var(--accent); text-align: center; }
-  .contact-row .fam { width: 80px; font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .contact-header {
+    display: flex; align-items: center; gap: 8px; padding: 4px 10px; font-size: 11px;
+    font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px;
+    border-bottom: 1px solid var(--border); margin-bottom: 2px;
+  }
+  .contact-header .h-check { width: 15px; }
+  .contact-header .h-name { flex: 2; min-width: 0; }
+  .contact-header .h-email { flex: 2; min-width: 0; }
+  .contact-header .h-families { flex: 2; min-width: 0; }
+  .contact-header .h-groups { flex: 2; min-width: 0; }
+  .contact-header .h-edit { width: 30px; }
+  .contact-row .name { flex: 2; font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .contact-row .email { flex: 2; color: var(--text-muted); font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .contact-row .col-families { flex: 2; display: flex; flex-wrap: wrap; gap: 3px; min-width: 0; }
+  .contact-row .col-groups { flex: 2; display: flex; flex-wrap: wrap; gap: 3px; min-width: 0; }
+  .contact-tag {
+    display: inline-block; font-size: 10px; padding: 1px 7px; border-radius: 8px;
+    white-space: nowrap; line-height: 1.4;
+  }
+  .contact-tag.fam-tag { background: var(--accent); color: #fff; opacity: 0.85; }
+  .contact-tag.grp-tag { background: #b8860b; color: #fff; opacity: 0.85; }
   .contact-edit-btn {
     background: none; border: none; cursor: pointer; color: var(--text-muted); font-size: 14px;
     padding: 2px 5px; border-radius: 4px; transition: color 0.15s;
   }
   .contact-edit-btn:hover { color: var(--accent); }
 
-  /* Contact edit dropdown */
-  .contact-edit-overlay {
-    display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-    background: rgba(0,0,0,0.35); z-index: 9999;
-  }
-  .contact-edit-overlay.show { display: block; }
-  .contact-edit-dropdown {
-    background: var(--surface); border: 1px solid var(--accent); border-radius: 8px;
-    padding: 12px 14px; display: flex; flex-direction: column; gap: 6px;
-    box-shadow: 0 6px 24px rgba(0,0,0,0.25); z-index: 10000; position: absolute;
-    left: 10px; right: 10px; top: 100%; margin-top: 2px;
-    animation: editDropIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
-  }
-  @keyframes editDropIn {
-    0% { opacity: 0; transform: scaleY(0.3) translateY(-8px); }
-    100% { opacity: 1; transform: scaleY(1) translateY(0); }
-  }
-  .contact-edit-dropdown .edit-row { display: flex; gap: 6px; }
-  .contact-edit-dropdown input, .contact-edit-dropdown select {
-    flex: 1; padding: 6px 8px; font-size: 12px; border: 1px solid var(--border);
-    border-radius: 5px; background: var(--bg); color: var(--text);
-  }
-  .contact-edit-dropdown .edit-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 2px; }
 
   .family-card {
     flex-direction: column; align-items: flex-start; background: var(--card-bg); margin-bottom: 6px; padding: 10px 12px;
   }
   .family-card .fam-header { display: flex; width: 100%; justify-content: space-between; align-items: center; }
   .family-card .fam-name { font-weight: 600; font-size: 14px; }
-  .family-card .fam-members { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+  .family-card .fam-members { font-size: 12px; color: var(--text-muted); margin-top: 4px; display: flex; flex-direction: column; gap: 1px; }
+  .fam-members .member-row { padding: 2px 0; }
 
   .empty-msg { text-align: center; color: var(--text-dim); padding: 30px 0; font-size: 13px; }
+
+  /* ── Groups split layout ── */
+  .groups-split { display: flex; gap: 10px; flex: 1; min-height: 0; }
+  .groups-left { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  .groups-right { flex: 1; display: flex; flex-direction: column; min-height: 0; border-left: 1px solid var(--border); padding-left: 10px; }
+  .groups-right-header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 6px; min-height: 28px;
+  }
+  .group-detail-title { font-weight: 700; font-size: 15px; color: var(--text); }
+  .group-item {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 10px; border-radius: 6px; cursor: pointer; font-size: 13px;
+    margin-bottom: 2px; transition: background 0.1s;
+  }
+  .group-item:hover { background: var(--row-hover); }
+  .group-item.active { background: var(--accent); color: #fff; }
+  .group-item.active .group-count { color: rgba(255,255,255,0.7); }
+  .group-item .group-name { font-weight: 500; }
+  .group-item .group-count { font-size: 11px; color: var(--text-muted); }
+  .group-member-row {
+    display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+    border-radius: 5px; font-size: 13px;
+  }
+  .group-member-row:hover { background: var(--row-hover); }
+  .group-member-row .gm-name { font-weight: 500; flex: 1; }
+  .group-member-row .gm-email { color: var(--text-muted); font-size: 12px; }
 
   /* ── Form inputs ── */
   .form-row { display: flex; gap: 6px; margin-bottom: 6px; }
@@ -837,15 +896,16 @@ HTML = r"""<!DOCTYPE html>
 
   /* Edit modal shared styles (Groups & Families) */
   .edit-member-list {
-    max-height: 150px; overflow-y: auto; margin: 4px 0; display: flex; flex-wrap: wrap; gap: 4px;
+    max-height: 150px; overflow-y: auto; margin: 4px 0; display: flex; flex-direction: column; gap: 2px;
   }
   .edit-member-pill {
-    display: inline-flex; align-items: center; gap: 4px;
-    background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
-    padding: 3px 10px; font-size: 11px; color: var(--text);
+    display: flex; align-items: center; justify-content: space-between;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 5px 10px; font-size: 12px; color: var(--text);
   }
   .edit-member-pill .remove-x {
-    cursor: pointer; color: var(--danger); font-weight: bold; font-size: 13px; line-height: 1;
+    cursor: pointer; color: var(--danger); font-weight: bold; font-size: 14px; line-height: 1;
+    padding: 0 2px;
   }
   .edit-member-pill .remove-x:hover { opacity: 0.7; }
   .edit-search-results {
@@ -962,7 +1022,7 @@ HTML = r"""<!DOCTYPE html>
 <div class="app">
 
   <!-- ════ LEFT PANEL ════ -->
-  <div class="left-panel">
+  <div class="left-panel" id="left-panel">
     <div class="tab-bar">
       <button class="tab-btn active" onclick="switchTab('contacts')">Contacts</button>
       <button class="tab-btn" onclick="switchTab('families')">Families</button>
@@ -997,11 +1057,25 @@ HTML = r"""<!DOCTYPE html>
 
     <!-- Groups Tab -->
     <div id="groups-tab" class="tab-content">
-      <div class="search-row">
-        <input type="text" class="tab-search" id="search-groups" placeholder="Search groups..." oninput="filterGroups()">
-        <button class="add-btn" onclick="openCreateGroup()" title="Add Group">+</button>
+      <div class="groups-split">
+        <div class="groups-left">
+          <div class="search-row">
+            <input type="text" class="tab-search" id="search-groups" placeholder="Search groups or members..." oninput="filterGroups()">
+            <button class="add-btn" onclick="openCreateGroup()" title="Add Group">+</button>
+          </div>
+          <div class="list-area" id="group-list"></div>
+        </div>
+        <div class="groups-right">
+          <div class="groups-right-header" id="group-detail-header">
+            <span class="group-detail-title" id="group-detail-title">Select a group</span>
+            <span id="group-detail-actions"></span>
+          </div>
+          <input type="text" class="tab-search" id="search-group-members" placeholder="Search members..." oninput="filterGroupMembers()" style="margin-bottom:6px;">
+          <div class="list-area" id="group-member-list">
+            <div class="empty-msg">Click a group to view its members</div>
+          </div>
+        </div>
       </div>
-      <div class="list-area" id="group-list"></div>
     </div>
 
     <!-- Scheduled Tab -->
@@ -1069,8 +1143,11 @@ HTML = r"""<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- ════ DIVIDER ════ -->
+  <div class="panel-divider" id="panel-divider"></div>
+
   <!-- ════ RIGHT PANEL ════ -->
-  <div class="right-panel">
+  <div class="right-panel" id="right-panel">
     <div class="composer-title">Email Composer</div>
     <div class="flex-row" style="margin-bottom:8px;">
       <select id="template-select" class="composer-select" onchange="loadTemplate()">
@@ -1141,7 +1218,6 @@ HTML = r"""<!DOCTYPE html>
 
 <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()">Light Mode</button>
 <div class="toast" id="toast"></div>
-<div class="contact-edit-overlay" id="contact-edit-overlay" onclick="closeEditContact()"></div>
 <div class="create-overlay" id="create-overlay" onclick="closeCreateModal()"></div>
 <div class="create-modal" id="create-modal"></div>
 
@@ -1190,15 +1266,9 @@ window.toggleTheme = function() {
   document.body.classList.toggle('light');
   var isLight = document.body.classList.contains('light');
   document.getElementById('theme-toggle').textContent = isLight ? 'Dark Mode' : 'Light Mode';
-  try { localStorage.setItem('theme', isLight ? 'light' : 'dark'); } catch(e) {}
+  pywebview.api.set_ui_setting('theme', isLight ? 'light' : 'dark');
 };
-// Restore saved theme
-try {
-  if (localStorage.getItem('theme') === 'light') {
-    document.body.classList.add('light');
-    document.getElementById('theme-toggle').textContent = 'Dark Mode';
-  }
-} catch(e) {}
+// Theme restored in initApp after API is ready
 
 // ── Extract editor content ──
 function getEditorHTML() {
@@ -1245,16 +1315,32 @@ async function loadContacts() {
 function renderContactList(contacts) {
   const el = document.getElementById('contact-list');
   if (!contacts.length) { renderEmpty(el, 'No contacts yet.'); return; }
-  el.innerHTML = contacts.map(c => `
+  const header = `<div class="contact-header">
+    <span class="h-check"></span>
+    <span class="h-name">Name</span>
+    <span class="h-email">Email</span>
+    <span class="h-families">Families</span>
+    <span class="h-groups">Groups</span>
+    <span class="h-edit"></span>
+  </div>`;
+  const rows = contacts.map(c => {
+    const famTags = (c.families && c.families.length)
+      ? c.families.map(f => `<span class="contact-tag fam-tag">${esc(f.name)}</span>`).join('')
+      : '<span style="font-size:11px;color:var(--text-dim);">-</span>';
+    const grpTags = (c.groups && c.groups.length)
+      ? c.groups.map(g => `<span class="contact-tag grp-tag">${esc(g)}</span>`).join('')
+      : '<span style="font-size:11px;color:var(--text-dim);">-</span>';
+    return `
     <div class="contact-row" id="contact-row-${c.id}">
       <input type="checkbox" data-id="${c.id}">
       <span class="name">${esc(c.name)}</span>
       <span class="email">${esc(c.email)}</span>
-      <span class="cat">${c.category === 'Family' ? '&#10003;' : ''}</span>
-      <span class="fam">${c.family_name ? esc(c.family_name) : '-'}</span>
+      <span class="col-families">${famTags}</span>
+      <span class="col-groups">${grpTags}</span>
       <button class="contact-edit-btn" onclick="editContact(${c.id})" title="Edit">&#9998;</button>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
+  el.innerHTML = header + rows;
 }
 
 window.filterContacts = function() {
@@ -1262,7 +1348,8 @@ window.filterContacts = function() {
   if (!q) { renderContactList(cachedContacts); return; }
   const filtered = cachedContacts.filter(c =>
     c.name.toLowerCase().includes(q) || c.email.toLowerCase().includes(q) ||
-    c.category.toLowerCase().includes(q) || (c.family_name && c.family_name.toLowerCase().includes(q))
+    (c.families && c.families.some(f => f.name.toLowerCase().includes(q))) ||
+    (c.groups && c.groups.some(g => g.toLowerCase().includes(q)))
   );
   renderContactList(filtered);
 };
@@ -1329,64 +1416,189 @@ window.deleteSelected = async function() {
   refreshAcCache();
 };
 
+// ── Contact edit modal (with family + group management) ──
+var _ceContactId = null;
+var _ceOriginalFamilies = [];
+var _ceOriginalGroups = [];
+var _cePendingFamAdds = [];
+var _cePendingFamRemoves = [];
+var _cePendingGrpAdds = [];
+var _cePendingGrpRemoves = [];
+
 window.editContact = function(id) {
-  closeEditContact();
   var c = cachedContacts.find(x => x.id === id);
   if (!c) return;
-  var row = document.getElementById('contact-row-' + id);
-  if (!row) return;
+  _ceContactId = id;
+  _ceOriginalFamilies = (c.families || []).slice();
+  _ceOriginalGroups = cachedGroups.filter(g => g.members.some(m => m.id === id)).map(g => ({id: g.id, name: g.name}));
+  _cePendingFamAdds = [];
+  _cePendingFamRemoves = [];
+  _cePendingGrpAdds = [];
+  _cePendingGrpRemoves = [];
 
-  // Build family options from the existing dropdown
-  var famOptions = '<option value="">No family</option>';
-  cachedFamilies.forEach(function(f) {
-    var sel = (c.family_name && f.name === c.family_name) ? ' selected' : '';
-    famOptions += '<option value="' + f.id + '"' + sel + '>' + esc(f.name) + '</option>';
-  });
-
-  var dd = document.createElement('div');
-  dd.className = 'contact-edit-dropdown';
-  dd.id = 'contact-edit-dd';
-  dd.innerHTML =
+  showCreateModal(
+    '<h3>Edit Contact</h3>' +
     '<div class="edit-row">' +
       '<input type="text" id="ce-name" value="' + esc(c.name).replace(/"/g, '&quot;') + '" placeholder="Name">' +
       '<input type="text" id="ce-email" value="' + esc(c.email).replace(/"/g, '&quot;') + '" placeholder="Email">' +
     '</div>' +
-    '<div class="edit-row">' +
-      '<select id="ce-category"><option value="Single"' + (c.category === 'Single' ? ' selected' : '') + '>Single</option><option value="Family"' + (c.category === 'Family' ? ' selected' : '') + '>Family</option></select>' +
-      '<select id="ce-family">' + famOptions + '</select>' +
-    '</div>' +
+    '<div class="edit-section-label">Families</div>' +
+    '<div class="edit-member-list" id="ce-fam-list"></div>' +
+    '<input type="text" id="ce-fam-search" placeholder="Search families to add..." oninput="ceFamSearch()" style="padding:6px 10px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);width:100%;box-sizing:border-box;">' +
+    '<div class="edit-search-results" id="ce-fam-results"></div>' +
+    '<div class="edit-section-label">Groups</div>' +
+    '<div class="edit-member-list" id="ce-grp-list"></div>' +
+    '<input type="text" id="ce-grp-search" placeholder="Search groups to add..." oninput="ceGrpSearch()" style="padding:6px 10px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);width:100%;box-sizing:border-box;">' +
+    '<div class="edit-search-results" id="ce-grp-results"></div>' +
     '<div class="edit-actions">' +
-      '<button class="btn btn-sm" onclick="closeEditContact()">Cancel</button>' +
-      '<button class="btn btn-primary btn-sm" onclick="saveEditContact(' + id + ')">Save</button>' +
-    '</div>';
-  dd.onclick = function(e) { e.stopPropagation(); };
-  row.appendChild(dd);
-
-  // Delay overlay show to next frame so the current click doesn't immediately close it
-  requestAnimationFrame(function() {
-    document.getElementById('contact-edit-overlay').classList.add('show');
-  });
+      '<button class="btn btn-sm" onclick="closeCreateModal()">Cancel</button>' +
+      '<button class="btn btn-primary btn-sm" onclick="saveEditContact()">Save</button>' +
+    '</div>'
+  );
+  ceRenderFamilies();
+  ceRenderGroups();
   document.getElementById('ce-name').focus();
 };
 
-window.saveEditContact = async function(id) {
-  var name = document.getElementById('ce-name').value.trim();
-  var email = document.getElementById('ce-email').value.trim();
-  var category = document.getElementById('ce-category').value;
-  var familyId = document.getElementById('ce-family').value || null;
-  if (!name || !email) { showToast('Enter both name and email.', 'error'); return; }
-  var res = await pywebview.api.update_contact(id, name, email, category, familyId);
-  if (!res.ok) { showToast(res.error, 'error'); return; }
-  closeEditContact();
-  loadContacts();
-  loadFamilies();
-  refreshAcCache();
+window.ceRenderFamilies = function() {
+  var el = document.getElementById('ce-fam-list');
+  var current = _ceOriginalFamilies.filter(f => _cePendingFamRemoves.indexOf(f.id) === -1);
+  var all = current.concat(_cePendingFamAdds);
+  if (!all.length) { el.innerHTML = '<span style="font-size:11px;color:var(--text-muted);">None</span>'; return; }
+  el.innerHTML = all.map(function(f) {
+    var isNew = _cePendingFamAdds.some(a => a.id === f.id);
+    return '<span class="edit-member-pill">' + esc(f.name) +
+      ' <span class="remove-x" onclick="ceRemoveFam(' + f.id + ',' + (isNew ? 'true' : 'false') + ')">&times;</span></span>';
+  }).join('');
 };
 
-window.closeEditContact = function() {
-  var dd = document.getElementById('contact-edit-dd');
-  if (dd) dd.remove();
-  document.getElementById('contact-edit-overlay').classList.remove('show');
+window.ceRemoveFam = function(famId, isNew) {
+  if (isNew) {
+    _cePendingFamAdds = _cePendingFamAdds.filter(a => a.id !== famId);
+  } else {
+    if (_cePendingFamRemoves.indexOf(famId) === -1) _cePendingFamRemoves.push(famId);
+  }
+  ceRenderFamilies();
+};
+
+window.ceFamSearch = function() {
+  var el = document.getElementById('ce-fam-results');
+  var q = document.getElementById('ce-fam-search').value.toLowerCase().trim();
+  if (!q) { el.innerHTML = ''; return; }
+  var currentIds = _ceOriginalFamilies.filter(f => _cePendingFamRemoves.indexOf(f.id) === -1).map(f => f.id);
+  var addedIds = _cePendingFamAdds.map(a => a.id);
+  var exclude = currentIds.concat(addedIds);
+  var matches = cachedFamilies.filter(function(f) {
+    if (exclude.indexOf(f.id) !== -1) return false;
+    return f.name.toLowerCase().includes(q);
+  }).slice(0, 8);
+  if (!matches.length) { el.innerHTML = '<div class="esr-item" style="color:var(--text-muted);cursor:default;">No matches</div>'; return; }
+  el.innerHTML = matches.map(function(f) {
+    return '<div class="esr-item" onclick="ceAddFam(' + f.id + ')">' + esc(f.name) + '</div>';
+  }).join('');
+};
+
+window.ceAddFam = function(famId) {
+  var f = cachedFamilies.find(x => x.id === famId);
+  if (!f) return;
+  var wasOriginal = _ceOriginalFamilies.some(o => o.id === famId);
+  if (wasOriginal) {
+    _cePendingFamRemoves = _cePendingFamRemoves.filter(id => id !== famId);
+  } else {
+    if (!_cePendingFamAdds.some(a => a.id === famId)) {
+      _cePendingFamAdds.push({id: f.id, name: f.name});
+    }
+  }
+  ceRenderFamilies();
+  document.getElementById('ce-fam-search').value = '';
+  document.getElementById('ce-fam-results').innerHTML = '';
+};
+
+window.ceRenderGroups = function() {
+  var el = document.getElementById('ce-grp-list');
+  var current = _ceOriginalGroups.filter(g => _cePendingGrpRemoves.indexOf(g.id) === -1);
+  var all = current.concat(_cePendingGrpAdds);
+  if (!all.length) { el.innerHTML = '<span style="font-size:11px;color:var(--text-muted);">None</span>'; return; }
+  el.innerHTML = all.map(function(g) {
+    var isNew = _cePendingGrpAdds.some(a => a.id === g.id);
+    return '<span class="edit-member-pill">' + esc(g.name) +
+      ' <span class="remove-x" onclick="ceRemoveGrp(' + g.id + ',' + (isNew ? 'true' : 'false') + ')">&times;</span></span>';
+  }).join('');
+};
+
+window.ceRemoveGrp = function(grpId, isNew) {
+  if (isNew) {
+    _cePendingGrpAdds = _cePendingGrpAdds.filter(a => a.id !== grpId);
+  } else {
+    if (_cePendingGrpRemoves.indexOf(grpId) === -1) _cePendingGrpRemoves.push(grpId);
+  }
+  ceRenderGroups();
+};
+
+window.ceGrpSearch = function() {
+  var el = document.getElementById('ce-grp-results');
+  var q = document.getElementById('ce-grp-search').value.toLowerCase().trim();
+  if (!q) { el.innerHTML = ''; return; }
+  var currentIds = _ceOriginalGroups.filter(g => _cePendingGrpRemoves.indexOf(g.id) === -1).map(g => g.id);
+  var addedIds = _cePendingGrpAdds.map(a => a.id);
+  var exclude = currentIds.concat(addedIds);
+  var matches = cachedGroups.filter(function(g) {
+    if (exclude.indexOf(g.id) !== -1) return false;
+    return g.name.toLowerCase().includes(q);
+  }).slice(0, 8);
+  if (!matches.length) { el.innerHTML = '<div class="esr-item" style="color:var(--text-muted);cursor:default;">No matches</div>'; return; }
+  el.innerHTML = matches.map(function(g) {
+    return '<div class="esr-item" onclick="ceAddGrp(' + g.id + ')">' + esc(g.name) + '</div>';
+  }).join('');
+};
+
+window.ceAddGrp = function(grpId) {
+  var g = cachedGroups.find(x => x.id === grpId);
+  if (!g) return;
+  var wasOriginal = _ceOriginalGroups.some(o => o.id === grpId);
+  if (wasOriginal) {
+    _cePendingGrpRemoves = _cePendingGrpRemoves.filter(id => id !== grpId);
+  } else {
+    if (!_cePendingGrpAdds.some(a => a.id === grpId)) {
+      _cePendingGrpAdds.push({id: g.id, name: g.name});
+    }
+  }
+  ceRenderGroups();
+  document.getElementById('ce-grp-search').value = '';
+  document.getElementById('ce-grp-results').innerHTML = '';
+};
+
+window.saveEditContact = async function() {
+  var name = document.getElementById('ce-name').value.trim();
+  var email = document.getElementById('ce-email').value.trim();
+  if (!name || !email) { showToast('Enter both name and email.', 'error'); return; }
+
+  // Update contact name/email (keep existing category/family_id for backwards compat)
+  var c = cachedContacts.find(x => x.id === _ceContactId);
+  var res = await pywebview.api.update_contact(_ceContactId, name, email, c ? c.category : 'Single', null);
+  if (!res.ok) { showToast(res.error, 'error'); return; }
+
+  // Family membership changes
+  for (var i = 0; i < _cePendingFamRemoves.length; i++) {
+    await pywebview.api.remove_family_member(_cePendingFamRemoves[i], _ceContactId);
+  }
+  for (var j = 0; j < _cePendingFamAdds.length; j++) {
+    await pywebview.api.add_family_member(_cePendingFamAdds[j].id, _ceContactId);
+  }
+
+  // Group membership changes
+  for (var k = 0; k < _cePendingGrpRemoves.length; k++) {
+    await pywebview.api.remove_group_member(_cePendingGrpRemoves[k], _ceContactId);
+  }
+  for (var l = 0; l < _cePendingGrpAdds.length; l++) {
+    await pywebview.api.add_group_member(_cePendingGrpAdds[l].id, _ceContactId);
+  }
+
+  closeCreateModal();
+  loadContacts();
+  loadFamilies();
+  loadGroups();
+  refreshAcCache();
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1404,7 +1616,7 @@ function renderFamilyList(families) {
   const el = document.getElementById('family-list');
   if (!families.length) { renderEmpty(el, 'No families yet.'); return; }
   el.innerHTML = families.map(f => {
-    const members = f.members.length ? f.members.map(m => esc(m.name)).join(', ') : 'No members';
+    const members = f.members.length ? f.members.map(m => '<div class="member-row">' + esc(m.name) + '</div>').join('') : '<div class="member-row" style="color:var(--text-dim);">No members</div>';
     return `
       <div class="family-card">
         <div class="fam-header">
@@ -1539,16 +1751,13 @@ window.saveEditFamily = async function() {
     var res = await pywebview.api.rename_family(_efFamilyId, newName);
     if (!res.ok) { showToast(res.error || 'Rename failed.', 'error'); return; }
   }
-  // Remove members from family (set to Single, no family)
+  // Remove members from family
   for (var i = 0; i < _efPendingRemoves.length; i++) {
-    var rm = cachedContacts.find(x => x.id === _efPendingRemoves[i]);
-    if (rm) await pywebview.api.update_contact(rm.id, rm.name, rm.email, 'Single', null);
+    await pywebview.api.remove_family_member(_efFamilyId, _efPendingRemoves[i]);
   }
-  // Add members to family (set to Family category with this family_id)
+  // Add members to family
   for (var j = 0; j < _efPendingAdds.length; j++) {
-    var ad = _efPendingAdds[j];
-    var contact = cachedContacts.find(x => x.id === ad.id);
-    if (contact) await pywebview.api.update_contact(contact.id, contact.name, contact.email, 'Family', _efFamilyId);
+    await pywebview.api.add_family_member(_efFamilyId, _efPendingAdds[j].id);
   }
   closeCreateModal();
   loadFamilies();
@@ -1978,6 +2187,7 @@ async function loadGroups() {
   cachedGroups = await pywebview.api.get_groups();
 
   renderGroupList(cachedGroups);
+  renderGroupDetail();
 
   // Update target selector with group options
   const tsel = document.getElementById('target-select');
@@ -1986,23 +2196,75 @@ async function loadGroups() {
   tsel.innerHTML = base + groupOpts;
 }
 
+var _selectedGroupId = null;
+
 function renderGroupList(groups) {
   const el = document.getElementById('group-list');
   if (!groups.length) {
     renderEmpty(el, 'No groups yet.');
   } else {
     el.innerHTML = groups.map(g => {
-      const members = g.members.length
-        ? g.members.map(m => esc(m.name)).join(', ')
-        : 'No members';
-      return renderCard(
-        esc(g.name),
-        '<span><button class="contact-edit-btn" onclick="editGroup(' + g.id + ')" title="Edit">&#9998;</button> <button class="btn btn-danger btn-sm" onclick="deleteGroup(' + g.id + ')">Delete</button></span>',
-        members
-      );
+      var active = g.id === _selectedGroupId ? ' active' : '';
+      return '<div class="group-item' + active + '" onclick="selectGroup(' + g.id + ')">' +
+        '<span class="group-name">' + esc(g.name) + '</span>' +
+        '<span class="group-count">' + g.members.length + '</span>' +
+      '</div>';
     }).join('');
   }
 }
+
+window.selectGroup = function(id) {
+  _selectedGroupId = id;
+  // Re-render left list to update active state
+  var q = document.getElementById('search-groups').value.toLowerCase().trim();
+  if (q) { filterGroups(); } else { renderGroupList(cachedGroups); }
+  // Render right detail panel
+  renderGroupDetail();
+};
+
+function renderGroupDetail() {
+  var titleEl = document.getElementById('group-detail-title');
+  var actionsEl = document.getElementById('group-detail-actions');
+  var listEl = document.getElementById('group-member-list');
+  var searchEl = document.getElementById('search-group-members');
+
+  if (!_selectedGroupId) {
+    titleEl.textContent = 'Select a group';
+    actionsEl.innerHTML = '';
+    listEl.innerHTML = '<div class="empty-msg">Click a group to view its members</div>';
+    searchEl.value = '';
+    return;
+  }
+
+  var group = cachedGroups.find(g => g.id === _selectedGroupId);
+  if (!group) { _selectedGroupId = null; renderGroupDetail(); return; }
+
+  titleEl.textContent = group.name;
+  actionsEl.innerHTML =
+    '<button class="contact-edit-btn" onclick="editGroup(' + group.id + ')" title="Edit">&#9998;</button> ' +
+    '<button class="btn btn-danger btn-sm" onclick="deleteGroup(' + group.id + ')">Delete</button>';
+
+  var mq = searchEl.value.toLowerCase().trim();
+  var members = group.members;
+  if (mq) {
+    members = members.filter(m => m.name.toLowerCase().includes(mq) || m.email.toLowerCase().includes(mq));
+  }
+
+  if (!members.length) {
+    listEl.innerHTML = '<div class="empty-msg">' + (mq ? 'No matching members' : 'No members in this group') + '</div>';
+  } else {
+    listEl.innerHTML = members.map(m =>
+      '<div class="group-member-row">' +
+        '<span class="gm-name">' + esc(m.name) + '</span>' +
+        '<span class="gm-email">' + esc(m.email) + '</span>' +
+      '</div>'
+    ).join('');
+  }
+}
+
+window.filterGroupMembers = function() {
+  renderGroupDetail();
+};
 
 window.filterGroups = function() {
   const q = document.getElementById('search-groups').value.toLowerCase().trim();
@@ -2073,6 +2335,7 @@ window.submitCreateGroup = async function() {
 
 window.deleteGroup = async function(id) {
   if (!confirm('Delete this group?')) return;
+  if (_selectedGroupId === id) _selectedGroupId = null;
   await pywebview.api.delete_group(id);
   loadGroups();
   refreshAcCache();
@@ -2682,6 +2945,57 @@ async function loadHistory() {
 }
 
 // ── Initial load (single wait, then sequential to avoid race conditions) ──
+// ══════════════════════════════════════════════════════════════════════════════
+// PANEL DIVIDER DRAG
+// ══════════════════════════════════════════════════════════════════════════════
+
+(function() {
+  var divider = document.getElementById('panel-divider');
+  var leftPanel = document.getElementById('left-panel');
+  var rightPanel = document.getElementById('right-panel');
+  var app = leftPanel.parentElement;
+  var dragging = false;
+
+  // Full-screen transparent overlay to block ALL elements (including Quill)
+  // from stealing mouse events during drag
+  var overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:99999;cursor:col-resize;display:none;';
+  document.body.appendChild(overlay);
+
+  function applyRatio(r) {
+    leftPanel.style.flex = '0 0 calc(' + (r * 100) + '% - 6px)';
+    rightPanel.style.flex = '1 1 0%';
+  }
+
+  // Ratio restored in initApp after API is ready
+
+  divider.addEventListener('mousedown', function(e) {
+    e.preventDefault();
+    dragging = true;
+    overlay.style.display = 'block';
+    divider.classList.add('dragging');
+  });
+
+  overlay.addEventListener('mousemove', function(e) {
+    if (!dragging) return;
+    var appRect = app.getBoundingClientRect();
+    var x = e.clientX - appRect.left;
+    var w = appRect.width;
+    var ratio = x / w;
+    if (ratio < 0.2) ratio = 0.2;
+    if (ratio > 0.8) ratio = 0.8;
+    applyRatio(ratio);
+    pywebview.api.set_ui_setting('panelRatio', ratio.toFixed(4));
+  });
+
+  overlay.addEventListener('mouseup', function(e) {
+    dragging = false;
+    overlay.style.display = 'none';
+    divider.classList.remove('dragging');
+  });
+})();
+
+// ── Initial load (single wait, then sequential to avoid race conditions) ──
 (async function initApp() {
   await waitForApi();
   await loadContacts();
@@ -2692,6 +3006,21 @@ async function loadHistory() {
   await loadTemplates();
   await loadSettings();
   await refreshAcCache();
+
+  // Restore UI settings (theme + panel ratio)
+  var theme = await pywebview.api.get_ui_setting('theme');
+  if (theme === 'light') {
+    document.body.classList.add('light');
+    document.getElementById('theme-toggle').textContent = 'Dark Mode';
+  }
+  var ratio = await pywebview.api.get_ui_setting('panelRatio');
+  if (ratio) {
+    var r = parseFloat(ratio);
+    if (r >= 0.2 && r <= 0.8) {
+      document.getElementById('left-panel').style.flex = '0 0 calc(' + (r * 100) + '% - 6px)';
+      document.getElementById('right-panel').style.flex = '1 1 0%';
+    }
+  }
 })();
 </script>
 </body>
