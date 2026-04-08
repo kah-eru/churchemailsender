@@ -1,0 +1,122 @@
+name: Build Installers
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller
+          pip install pywebview pystray Pillow pyobjc-framework-Cocoa
+
+      - name: Build macOS app
+        run: |
+          pyinstaller \
+            --onedir \
+            --windowed \
+            --name "Church Roster" \
+            --add-data "db_manager.py:." \
+            --hidden-import pystray._darwin \
+            --hidden-import PIL.Image \
+            --hidden-import PIL.ImageDraw \
+            --hidden-import webview \
+            --hidden-import zoneinfo \
+            main.py
+
+      - name: Create DMG
+        run: |
+          brew install create-dmg
+          create-dmg \
+            --volname "Church Roster" \
+            --volicon "dist/Church Roster.app/Contents/Resources/icon-windowed.icns" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon "Church Roster.app" 150 200 \
+            --app-drop-link 450 200 \
+            --no-internet-enable \
+            "Church-Roster-macOS.dmg" \
+            "dist/Church Roster.app" \
+          || {
+            # Fallback: create DMG without icon if icns doesn't exist
+            create-dmg \
+              --volname "Church Roster" \
+              --window-pos 200 120 \
+              --window-size 600 400 \
+              --icon "Church Roster.app" 150 200 \
+              --app-drop-link 450 200 \
+              --no-internet-enable \
+              "Church-Roster-macOS.dmg" \
+              "dist/Church Roster.app"
+          }
+
+      - name: Upload macOS DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: Church-Roster-macOS.dmg
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller
+          pip install pywebview pystray Pillow
+
+      - name: Build Windows exe
+        run: |
+          pyinstaller `
+            --onefile `
+            --windowed `
+            --name "ChurchRoster" `
+            --add-data "db_manager.py;." `
+            --hidden-import pystray._win32 `
+            --hidden-import PIL.Image `
+            --hidden-import PIL.ImageDraw `
+            --hidden-import webview `
+            --hidden-import zoneinfo `
+            --hidden-import clr `
+            main.py
+
+      - name: Upload Windows exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: dist/ChurchRoster.exe
+
+  release:
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            macos-dmg/Church-Roster-macOS.dmg
+            windows-exe/ChurchRoster.exe
+          generate_release_notes: true
