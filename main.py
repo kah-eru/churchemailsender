@@ -3,8 +3,11 @@ import csv
 import json
 import mimetypes
 import os
+import platform
 import re
 import smtplib
+import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -17,8 +20,36 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 import webview
+from PIL import Image, ImageDraw
+import pystray
 
 import db_manager
+
+# ── Frozen exe detection ────────────────────────────────────────────────────
+IS_FROZEN = getattr(sys, "frozen", False)
+APP_DIR = os.path.dirname(sys.executable if IS_FROZEN else os.path.abspath(__file__))
+APP_NAME = "Church Roster & Email Dispatcher"
+
+_EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+
+
+def _friendly_smtp_error(error_str):
+    """Convert raw SMTP errors into user-friendly messages."""
+    e = error_str.lower()
+    if "username and password not accepted" in e or "authentication" in e or "535" in e:
+        return "Authentication failed. If using Gmail, make sure you're using an App Password (not your regular password). Generate one at myaccount.google.com > Security > App Passwords."
+    if "connection refused" in e or "errno 61" in e:
+        return "Connection refused. Check your SMTP host and port settings."
+    if "timed out" in e or "timeout" in e:
+        return "Connection timed out. Check your internet connection and SMTP server settings."
+    if "ssl" in e or "tls" in e:
+        return "SSL/TLS error. Your SMTP server may require different security settings."
+    if "relay" in e or "550" in e:
+        return "Relay denied. The SMTP server rejected the sender address."
+    if "getaddrinfo" in e or "name resolution" in e:
+        return "Could not resolve SMTP server hostname. Check the server address."
+    return error_str
+
 
 # ── Python API exposed to JavaScript ─────────────────────────────────────────
 
@@ -29,22 +60,45 @@ class Api:
         family_map = db_manager.get_contact_families()
         return [
             {"id": r[0], "name": r[1], "email": r[2], "category": r[3], "family_name": r[4],
+             "phone": r[5] or "", "notes": r[6] or "", "opt_out": bool(r[7]),
+             "created_at": r[8] or "", "last_emailed_at": r[9] or "", "email_count": r[10] or 0,
              "families": family_map.get(r[0], []), "groups": group_map.get(r[0], [])}
             for r in rows
         ]
 
-    def add_contact(self, name, email, category, family_id):
+    def add_contact(self, name, email, category, family_id, phone="", notes=""):
         try:
             fid = int(family_id) if family_id else None
-            db_manager.add_contact(name, email, category, fid)
+            db_manager.add_contact(name, email, category, fid, phone=phone, notes=notes)
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    def update_contact(self, contact_id, name, email, category, family_id):
+    def update_contact(self, contact_id, name, email, category, family_id, phone="", notes=""):
         try:
             fid = int(family_id) if family_id else None
-            db_manager.update_contact(int(contact_id), name, email, category, fid)
+            db_manager.update_contact(int(contact_id), name, email, category, fid, phone=phone, notes=notes)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def set_contact_opt_out(self, contact_id, opt_out):
+        try:
+            db_manager.set_contact_opt_out(int(contact_id), opt_out)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def bulk_update_category(self, contact_ids, category):
+        try:
+            db_manager.bulk_update_category([int(c) for c in contact_ids], category)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def bulk_add_to_group(self, group_id, contact_ids):
+        try:
+            db_manager.bulk_add_to_group(int(group_id), [int(c) for c in contact_ids])
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -55,16 +109,11 @@ class Api:
         return {"ok": True}
 
     def get_families(self):
-        families = db_manager.get_families()
-        result = []
-        for fid, fname in families:
-            members = db_manager.get_family_members_via_junction(fid)
-            result.append({
-                "id": fid,
-                "name": fname,
-                "members": [{"id": m[0], "name": m[1], "email": m[2]} for m in members],
-            })
-        return result
+        return [
+            {"id": fid, "name": fname,
+             "members": [{"id": m[0], "name": m[1], "email": m[2]} for m in members]}
+            for fid, fname, members in db_manager.get_all_families_with_members()
+        ]
 
     def add_family_member(self, family_id, contact_id):
         try:
@@ -101,14 +150,25 @@ class Api:
         email = db_manager.get_setting("sender_email") or ""
         password = db_manager.get_setting("app_password") or ""
         timezone = db_manager.get_setting("timezone") or "US/Eastern"
+        sender_name = db_manager.get_setting("sender_name") or ""
+        smtp_host = db_manager.get_setting("smtp_host") or "smtp.gmail.com"
+        smtp_port = db_manager.get_setting("smtp_port") or "587"
         masked = ("*" * (len(password) - 4) + password[-4:]) if len(password) > 4 else "*" * len(password)
-        return {"email": email, "app_password_masked": masked, "has_password": bool(password), "timezone": timezone}
+        return {"email": email, "app_password_masked": masked, "has_password": bool(password),
+                "timezone": timezone, "sender_name": sender_name,
+                "smtp_host": smtp_host, "smtp_port": smtp_port,
+                "launch_on_startup": is_startup_enabled()}
 
-    def save_settings(self, email, app_password):
+    def save_settings(self, email, app_password, sender_name="", smtp_host="", smtp_port=""):
         try:
             db_manager.set_setting("sender_email", email)
             if app_password:
                 db_manager.set_setting("app_password", app_password)
+            db_manager.set_setting("sender_name", sender_name)
+            if smtp_host:
+                db_manager.set_setting("smtp_host", smtp_host)
+            if smtp_port:
+                db_manager.set_setting("smtp_port", smtp_port)
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -126,12 +186,49 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    def test_email_connection(self, email, app_password):
+    def test_email_connection(self, email, app_password, smtp_host="", smtp_port=""):
         try:
-            with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            host = smtp_host or db_manager.get_setting("smtp_host") or "smtp.gmail.com"
+            port = int(smtp_port or db_manager.get_setting("smtp_port") or "587")
+            with smtplib.SMTP(host, port, timeout=15) as server:
                 server.starttls()
                 server.login(email, app_password)
             return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": _friendly_smtp_error(str(e))}
+
+    def send_test_email(self):
+        """Send a test email to the configured sender address."""
+        sender_email = db_manager.get_setting("sender_email")
+        app_password = db_manager.get_setting("app_password")
+        if not sender_email or not app_password:
+            return {"ok": False, "error": "Email credentials not configured. Go to Settings tab."}
+        sender_name = db_manager.get_setting("sender_name") or ""
+        host = db_manager.get_setting("smtp_host") or "smtp.gmail.com"
+        port = int(db_manager.get_setting("smtp_port") or "587")
+        try:
+            from_addr = f"{sender_name} <{sender_email}>" if sender_name else sender_email
+            msg = MIMEMultipart("alternative")
+            msg["From"] = from_addr
+            msg["To"] = sender_email
+            msg["Subject"] = "Test Email from Church Roster App"
+            msg.attach(MIMEText("This is a test email. If you received this, your settings are correct!", "plain"))
+            msg.attach(MIMEText("<p>This is a <strong>test email</strong>. If you received this, your settings are correct!</p>", "html"))
+            with smtplib.SMTP(host, port, timeout=15) as server:
+                server.starttls()
+                server.login(sender_email, app_password)
+                server.sendmail(sender_email, sender_email, msg.as_string())
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": _friendly_smtp_error(str(e))}
+
+    def set_launch_on_startup(self, enabled):
+        try:
+            if enabled:
+                enable_startup()
+            else:
+                disable_startup()
+            return {"ok": True, "enabled": is_startup_enabled()}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -163,13 +260,17 @@ class Api:
         return new_html, images
 
     @staticmethod
-    def _build_message(sender_email, to_email, subject, plain_text, processed_html, image_data, attachment_paths):
+    def _build_message(sender_email, to_email, subject, plain_text, processed_html, image_data, attachment_paths, sender_name="", cc_addrs=None, bcc_addrs=None):
         """Build a fresh MIME message for one recipient."""
 
         msg = MIMEMultipart("mixed")
-        msg["From"] = sender_email
+        msg["From"] = f"{sender_name} <{sender_email}>" if sender_name else sender_email
         msg["To"] = to_email
         msg["Subject"] = subject
+        if cc_addrs:
+            msg["Cc"] = ", ".join(cc_addrs)
+        if bcc_addrs:
+            msg["Bcc"] = ", ".join(bcc_addrs)
 
         # Related part (HTML + inline images)
         related = MIMEMultipart("related")
@@ -214,28 +315,50 @@ class Api:
         return msg
 
     @staticmethod
-    def _send_to_recipients(sender_email, app_password, recipients, subject, plain_text, html_body, attachment_paths):
+    def _send_to_recipients(sender_email, app_password, recipients, subject, plain_text, html_body, attachment_paths, cc_emails=None, bcc_emails=None):
         """Shared email-sending logic used by both dispatch and scheduler."""
+        sender_name = db_manager.get_setting("sender_name") or ""
+        smtp_host = db_manager.get_setting("smtp_host") or "smtp.gmail.com"
+        smtp_port = int(db_manager.get_setting("smtp_port") or "587")
         processed_html, image_data = Api._extract_inline_images(html_body)
         sent, failed = 0, 0
         error = None
+        details = []
+        sent_emails = []
         try:
-            with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
                 server.starttls()
                 server.login(sender_email, app_password)
                 for name, email_addr in recipients:
                     try:
-                        msg = Api._build_message(sender_email, email_addr, subject, plain_text, processed_html, image_data, attachment_paths)
-                        server.sendmail(sender_email, email_addr, msg.as_string())
+                        # Template variable substitution
+                        p_html = processed_html.replace("{name}", name or "").replace("{email}", email_addr)
+                        p_text = plain_text.replace("{name}", name or "").replace("{email}", email_addr)
+                        p_subj = subject.replace("{name}", name or "").replace("{email}", email_addr)
+                        msg = Api._build_message(sender_email, email_addr, p_subj, p_text, p_html, image_data, attachment_paths, sender_name=sender_name, cc_addrs=cc_emails, bcc_addrs=bcc_emails)
+                        all_recipients = [email_addr] + (cc_emails or []) + (bcc_emails or [])
+                        server.sendmail(sender_email, all_recipients, msg.as_string())
                         sent += 1
+                        sent_emails.append(email_addr)
+                        details.append({"name": name, "email": email_addr, "status": "sent"})
                     except Exception as e:
                         print(f"[Email] Failed to send to {email_addr}: {e}")
                         failed += 1
+                        details.append({"name": name, "email": email_addr, "status": "failed", "error": _friendly_smtp_error(str(e))})
         except Exception as e:
-            error = str(e)
-        return {"sent": sent, "failed": failed, "error": error}
+            error = _friendly_smtp_error(str(e))
+            for name, email_addr in recipients:
+                if not any(d["email"] == email_addr for d in details):
+                    details.append({"name": name, "email": email_addr, "status": "failed", "error": error})
+        # Update contact email stats for successfully sent
+        if sent_emails:
+            try:
+                db_manager.update_contact_email_stats(sent_emails)
+            except Exception:
+                pass
+        return {"sent": sent, "failed": failed, "error": error, "details": details}
 
-    def dispatch_emails(self, subject, html_body, plain_text, contact_ids, attachment_paths=None, target_type="all", target_id=None, manual_emails=None):
+    def dispatch_emails(self, subject, html_body, plain_text, contact_ids, attachment_paths=None, target_type="all", target_id=None, manual_emails=None, targets=None, cc_emails=None, bcc_emails=None):
         sender_email = db_manager.get_setting("sender_email")
         app_password = db_manager.get_setting("app_password")
         if not sender_email or not app_password:
@@ -244,11 +367,19 @@ class Api:
         recipients = []
         if contact_ids:
             recipients += self.resolve_recipients("custom", contact_ids=contact_ids)
-        if target_type and target_type != "manual":
+        if targets and isinstance(targets, list):
+            for t in targets:
+                recipients += self.resolve_recipients(t["type"], target_id=t.get("id"))
+        elif target_type and target_type != "manual":
             recipients += self.resolve_recipients(target_type, target_id=target_id)
         if manual_emails:
             for email in manual_emails:
-                recipients.append((email, email))
+                if _EMAIL_RE.match(email):
+                    recipients.append((email, email))
+
+        # Filter out opted-out contacts
+        opt_out_emails = {r[2] for r in db_manager.get_contacts() if r[7]}
+        recipients = [(n, e) for n, e in recipients if e not in opt_out_emails]
 
         # Deduplicate by email address
         seen = set()
@@ -262,26 +393,51 @@ class Api:
         if not recipients:
             return {"sent": 0, "failed": 0, "error": "No recipients specified."}
 
-        result = self._send_to_recipients(sender_email, app_password, recipients, subject, plain_text, html_body, attachment_paths or [])
+        # Validate and deduplicate CC/BCC
+        cc = [e for e in (cc_emails or []) if _EMAIL_RE.match(e)] if cc_emails else None
+        bcc = [e for e in (bcc_emails or []) if _EMAIL_RE.match(e)] if bcc_emails else None
+
+        result = self._send_to_recipients(sender_email, app_password, recipients, subject, plain_text, html_body, attachment_paths or [], cc_emails=cc, bcc_emails=bcc)
         target_desc = target_type or "manual"
         if manual_emails:
             target_desc = f"{len(manual_emails)} manual" + (f" + {target_type}" if target_type and target_type != "manual" else "")
-        db_manager.log_email(subject, target_desc, len(recipients), result["sent"], result["failed"])
+        db_manager.log_email(subject, target_desc, len(recipients), result["sent"], result["failed"], result.get("details"))
         return result
+
+    def get_recipient_count(self, contact_ids=None, targets=None, manual_emails=None, target_type=None, target_id=None):
+        """Resolve and count recipients without sending."""
+        recipients = []
+        if contact_ids:
+            recipients += self.resolve_recipients("custom", contact_ids=contact_ids)
+        if targets and isinstance(targets, list):
+            for t in targets:
+                recipients += self.resolve_recipients(t["type"], target_id=t.get("id"))
+        elif target_type and target_type != "manual":
+            recipients += self.resolve_recipients(target_type, target_id=target_id)
+        if manual_emails:
+            for email in manual_emails:
+                if _EMAIL_RE.match(email):
+                    recipients.append((email, email))
+        # Filter opted-out
+        opt_out_emails = {r[2] for r in db_manager.get_contacts() if r[7]}
+        recipients = [(n, e) for n, e in recipients if e not in opt_out_emails]
+        # Deduplicate
+        seen = set()
+        unique = []
+        for name, email in recipients:
+            if email not in seen:
+                seen.add(email)
+                unique.append({"name": name, "email": email})
+        return {"count": len(unique), "recipients": unique}
 
     # ── Groups ──
 
     def get_groups(self):
-        groups = db_manager.get_groups()
-        result = []
-        for gid, gname in groups:
-            members = db_manager.get_group_members(gid)
-            result.append({
-                "id": gid,
-                "name": gname,
-                "members": [{"id": m[0], "name": m[1], "email": m[2]} for m in members],
-            })
-        return result
+        return [
+            {"id": gid, "name": gname,
+             "members": [{"id": m[0], "name": m[1], "email": m[2]} for m in members]}
+            for gid, gname, members in db_manager.get_all_groups_with_members()
+        ]
 
     def add_group(self, name):
         try:
@@ -380,6 +536,23 @@ class Api:
         db_manager.cancel_scheduled_email(int(email_id))
         return {"ok": True}
 
+    def update_scheduled_email(self, email_id, subject, html_body, plain_text, target_type, target_id, contact_ids, attachment_paths, scheduled_at, recurrence=None, manual_emails=None):
+        try:
+            tid = int(target_id) if target_id else None
+            db_manager.update_scheduled_email(int(email_id), subject, html_body, plain_text, target_type, tid, contact_ids or [], attachment_paths or [], scheduled_at, recurrence=recurrence, manual_emails=manual_emails or [])
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def duplicate_scheduled_email(self, email_id):
+        try:
+            new_id = db_manager.duplicate_scheduled_email(int(email_id))
+            if new_id:
+                return {"ok": True, "id": new_id}
+            return {"ok": False, "error": "Email not found"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     def resolve_recipients(self, target_type, target_id=None, contact_ids=None):
         if target_type == "group" and target_id:
             members = db_manager.get_group_members(int(target_id))
@@ -421,6 +594,15 @@ class Api:
     def delete_template(self, template_id):
         db_manager.delete_template(int(template_id))
         return {"ok": True}
+
+    def duplicate_template(self, template_id):
+        try:
+            new_id = db_manager.duplicate_template(int(template_id))
+            if new_id:
+                return {"ok": True, "id": new_id}
+            return {"ok": False, "error": "Template not found"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
 
     # ── CSV Import/Export ──
 
@@ -489,12 +671,52 @@ class Api:
             for r in rows
         ]
 
+    def get_email_history_details(self, history_id):
+        rows = db_manager.get_email_history_details(history_id)
+        return [
+            {"name": r[0], "email": r[1], "status": r[2], "error": r[3]}
+            for r in rows
+        ]
+
+    def get_email_history_filtered(self, start_date=None, end_date=None):
+        rows = db_manager.get_email_history_filtered(start_date, end_date)
+        return [
+            {"id": r[0], "subject": r[1], "target": r[2], "recipients": r[3],
+             "sent": r[4], "failed": r[5], "sent_at": r[6]}
+            for r in rows
+        ]
+
+    def get_analytics(self):
+        return db_manager.get_analytics()
+
+    def backup_database(self):
+        result = webview.windows[0].create_file_dialog(webview.FileDialog.SAVE, save_filename="contacts_backup.db")
+        if not result:
+            return {"ok": False, "error": "No location selected."}
+        filepath = result if isinstance(result, str) else result[0]
+        try:
+            db_manager.backup_database(filepath)
+            return {"ok": True, "path": filepath}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def restore_database(self):
+        result = webview.windows[0].create_file_dialog(webview.FileDialog.OPEN, file_types=("Database Files (*.db)",))
+        if not result:
+            return {"ok": False, "error": "No file selected."}
+        filepath = result[0]
+        try:
+            db_manager.restore_database(filepath)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
 
 # ── Background Scheduler ────────────────────────────────────────────────────
 
 def run_scheduler(api_instance):
-    """Check for due scheduled emails every 60 seconds."""
-    print("[Scheduler] Started — checking every 60s")
+    """Check for due scheduled emails every 30 seconds."""
+    print("[Scheduler] Started — checking every 30s")
     while True:
         try:
             tz_name = db_manager.get_setting("timezone") or "US/Eastern"
@@ -515,8 +737,21 @@ def run_scheduler(api_instance):
 
                 recipients = api_instance.resolve_recipients(target_type, target_id, contact_ids)
                 for email in manual_emails:
-                    if not any(r[1] == email for r in recipients):
+                    if _EMAIL_RE.match(email) and not any(r[1] == email for r in recipients):
                         recipients.append((email, email))
+
+                # Filter out opted-out contacts
+                opt_out_emails = {r[2] for r in db_manager.get_contacts() if r[7]}
+                recipients = [(n, e) for n, e in recipients if e not in opt_out_emails]
+
+                # Deduplicate by email address
+                seen = set()
+                unique = []
+                for name, email_addr in recipients:
+                    if email_addr not in seen:
+                        seen.add(email_addr)
+                        unique.append((name, email_addr))
+                recipients = unique
 
                 if not recipients:
                     db_manager.update_email_status(eid, "failed", {"sent": 0, "failed": 0, "error": "No recipients"})
@@ -529,10 +764,15 @@ def run_scheduler(api_instance):
                     continue
 
                 result = Api._send_to_recipients(sender_email, app_password, recipients, subject, plain_text, html_body, attachment_paths)
-                status = "failed" if result["error"] else "sent"
+                if result["error"]:
+                    status = "failed"
+                elif result["failed"] > 0:
+                    status = "failed" if result["sent"] == 0 else "sent"
+                else:
+                    status = "sent"
                 db_manager.update_email_status(eid, status, result)
                 print(f"[Scheduler] Email '{subject}' — {status} (sent:{result['sent']}, failed:{result['failed']})")
-                db_manager.log_email(subject, target_type, len(recipients), result["sent"], result["failed"])
+                db_manager.log_email(subject, target_type, len(recipients), result["sent"], result["failed"], result.get("details"))
 
                 # Schedule next occurrence for recurring emails
                 if recurrence and recurrence.get("type", "once") != "once":
@@ -735,6 +975,12 @@ HTML = r"""<!DOCTYPE html>
   .group-member-row:hover { background: var(--row-hover); }
   .group-member-row .gm-name { font-weight: 500; flex: 1; }
   .group-member-row .gm-email { color: var(--text-muted); font-size: 12px; }
+  .hist-recipient-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 4px; font-size: 13px; }
+  .hist-recipient-row:nth-child(even) { background: var(--row-hover); }
+  .hist-status { font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 3px; flex-shrink: 0; }
+  .hist-status.sent { background: var(--success); color: #fff; }
+  .hist-status.failed { background: var(--danger); color: #fff; }
+  .hist-error { font-size: 11px; color: var(--danger); margin-left: auto; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   /* ── Form inputs ── */
   .form-row { display: flex; gap: 6px; margin-bottom: 6px; }
@@ -979,6 +1225,92 @@ HTML = r"""<!DOCTYPE html>
     box-sizing: border-box;
   }
   .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+  /* ── Preview modal ── */
+  .preview-overlay {
+    display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.6); z-index: 10001; align-items: center; justify-content: center;
+  }
+  .preview-overlay.show { display: flex; }
+  .preview-box {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px; width: 70%; max-width: 700px; max-height: 80vh; overflow-y: auto;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+  }
+  .preview-box h3 { margin: 0 0 8px; font-size: 16px; }
+  .preview-meta { font-size: 12px; color: var(--text-muted); margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  .preview-body { font-size: 14px; line-height: 1.6; }
+  .preview-body img { max-width: 100%; }
+
+  /* ── Loading spinner ── */
+  .spinner-overlay {
+    display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.3); z-index: 10002; align-items: center; justify-content: center;
+  }
+  .spinner-overlay.show { display: flex; }
+  .spinner {
+    width: 40px; height: 40px; border: 4px solid var(--border);
+    border-top-color: var(--accent); border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── CC/BCC fields ── */
+  .cc-bcc-row { display: flex; gap: 6px; margin-bottom: 6px; flex-shrink: 0; }
+  .cc-bcc-row input {
+    flex: 1; padding: 5px 8px; border: 1px solid var(--border); border-radius: 5px;
+    background: var(--surface); color: var(--text); font-size: 11px; outline: none;
+  }
+  .cc-bcc-toggle {
+    font-size: 11px; color: var(--text-muted); cursor: pointer; margin-bottom: 4px;
+    flex-shrink: 0;
+  }
+  .cc-bcc-toggle:hover { color: var(--accent); }
+
+  /* ── Sortable headers ── */
+  .contact-header span[data-sort] { cursor: pointer; user-select: none; }
+  .contact-header span[data-sort]:hover { color: var(--accent); }
+  .contact-header span[data-sort]::after { content: ''; margin-left: 3px; }
+  .contact-header span[data-sort].sort-asc::after { content: ' \u25B2'; font-size: 9px; }
+  .contact-header span[data-sort].sort-desc::after { content: ' \u25BC'; font-size: 9px; }
+
+  /* ── Advanced filter row ── */
+  .filter-row { display: flex; gap: 4px; margin-bottom: 6px; flex-wrap: wrap; align-items: center; }
+  .filter-row select, .filter-row input {
+    padding: 4px 6px; font-size: 11px; border: 1px solid var(--border);
+    border-radius: 4px; background: var(--surface); color: var(--text);
+  }
+  .filter-label { font-size: 11px; color: var(--text-muted); }
+
+  /* ── Analytics ── */
+  .analytics-card {
+    background: var(--card-bg); border-radius: 8px; padding: 12px; margin-bottom: 8px;
+  }
+  .analytics-card h4 { font-size: 13px; margin: 0 0 6px; color: var(--text); }
+  .analytics-stat { font-size: 24px; font-weight: 700; color: var(--accent); }
+  .analytics-label { font-size: 11px; color: var(--text-muted); }
+  .analytics-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
+  .analytics-bar { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 3px 0; }
+  .analytics-bar-fill { height: 8px; border-radius: 4px; background: var(--accent); }
+
+  /* ── Recurring badge ── */
+  .recur-badge {
+    font-size: 9px; padding: 1px 5px; border-radius: 3px;
+    background: #7a6ab5; color: #fff; font-weight: 600; text-transform: uppercase;
+  }
+
+  /* ── Opt-out badge ── */
+  .opt-out-badge {
+    font-size: 9px; padding: 1px 5px; border-radius: 3px;
+    background: var(--danger); color: #fff; font-weight: 600;
+  }
+
+  /* ── Unsaved dot indicator ── */
+  .unsaved-dot {
+    display: none; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--danger); margin-left: 6px;
+  }
+  .unsaved-dot.show { display: inline-block; }
 </style>
 
 <link href="https://cdn.jsdelivr.net/npm/quill@2.0.3/dist/quill.snow.css" rel="stylesheet">
@@ -1029,6 +1361,7 @@ HTML = r"""<!DOCTYPE html>
       <button class="tab-btn" onclick="switchTab('groups')">Groups</button>
       <button class="tab-btn" onclick="switchTab('scheduled')">Scheduled</button>
       <button class="tab-btn" onclick="switchTab('history')">History</button>
+      <button class="tab-btn" onclick="switchTab('analytics')">Analytics</button>
       <button class="tab-btn" onclick="switchTab('settings')">Settings</button>
     </div>
 
@@ -1038,9 +1371,30 @@ HTML = r"""<!DOCTYPE html>
         <input type="text" class="tab-search" id="search-contacts" placeholder="Search contacts..." oninput="filterContacts()">
         <button class="add-btn" onclick="openCreateContact()" title="Add Contact">+</button>
       </div>
+      <div class="filter-row">
+        <span class="filter-label">Filter:</span>
+        <select id="filter-category" onchange="filterContacts()">
+          <option value="">All categories</option>
+          <option value="Family">Family</option>
+          <option value="Single">Single</option>
+        </select>
+        <select id="filter-group" onchange="filterContacts()">
+          <option value="">All groups</option>
+        </select>
+        <select id="filter-family" onchange="filterContacts()">
+          <option value="">All families</option>
+        </select>
+        <select id="filter-optout" onchange="filterContacts()">
+          <option value="">Include opted-out</option>
+          <option value="active">Active only</option>
+          <option value="optout">Opted-out only</option>
+        </select>
+      </div>
       <div class="list-area" id="contact-list"></div>
-      <div class="btn-row">
+      <div class="btn-row" style="flex-wrap:wrap;gap:4px;">
         <button class="btn btn-danger" onclick="deleteSelected()">Delete Selected</button>
+        <button class="btn btn-primary" onclick="bulkCategoryChange()">Change Category</button>
+        <button class="btn btn-primary" onclick="bulkAddToGroup()">Add to Group</button>
         <button class="btn btn-primary btn-success" onclick="importCSV()">Import CSV</button>
         <button class="btn btn-primary" onclick="exportCSV()">Export CSV</button>
       </div>
@@ -1048,11 +1402,25 @@ HTML = r"""<!DOCTYPE html>
 
     <!-- Families Tab -->
     <div id="families-tab" class="tab-content">
-      <div class="search-row">
-        <input type="text" class="tab-search" id="search-families" placeholder="Search families..." oninput="filterFamilies()">
-        <button class="add-btn" onclick="openCreateFamily()" title="Add Family">+</button>
+      <div class="groups-split">
+        <div class="groups-left">
+          <div class="search-row">
+            <input type="text" class="tab-search" id="search-families" placeholder="Search families or members..." oninput="filterFamilies()">
+            <button class="add-btn" onclick="openCreateFamily()" title="Add Family">+</button>
+          </div>
+          <div class="list-area" id="family-list"></div>
+        </div>
+        <div class="groups-right">
+          <div class="groups-right-header" id="family-detail-header">
+            <span class="group-detail-title" id="family-detail-title">Select a family</span>
+            <span id="family-detail-actions"></span>
+          </div>
+          <input type="text" class="tab-search" id="search-family-members" placeholder="Search members..." oninput="filterFamilyMembers()" style="margin-bottom:6px;">
+          <div class="list-area" id="family-member-list">
+            <div class="empty-msg">Click a family to view its members</div>
+          </div>
+        </div>
       </div>
-      <div class="list-area" id="family-list"></div>
     </div>
 
     <!-- Groups Tab -->
@@ -1090,22 +1458,61 @@ HTML = r"""<!DOCTYPE html>
 
     <!-- History Tab -->
     <div id="history-tab" class="tab-content">
-      <div class="list-area" id="history-list"></div>
+      <div class="groups-split">
+        <div class="groups-left">
+          <div class="search-row">
+            <input type="text" class="tab-search" id="search-history" placeholder="Search history..." oninput="filterHistory()">
+          </div>
+          <div class="filter-row">
+            <span class="filter-label">From:</span>
+            <input type="date" id="history-start-date" onchange="filterHistoryByDate()">
+            <span class="filter-label">To:</span>
+            <input type="date" id="history-end-date" onchange="filterHistoryByDate()">
+            <button class="btn btn-sm" onclick="clearHistoryDateFilter()">Clear</button>
+          </div>
+          <div class="list-area" id="history-list"></div>
+        </div>
+        <div class="groups-right">
+          <div class="groups-right-header" id="history-detail-header">
+            <span class="group-detail-title" id="history-detail-title">Select an email</span>
+          </div>
+          <div id="history-detail-meta" style="font-size:12px;color:var(--text-muted);margin-bottom:6px;"></div>
+          <input type="text" class="tab-search" id="search-history-recipients" placeholder="Search recipients..." oninput="filterHistoryRecipients()" style="margin-bottom:6px;">
+          <div class="list-area" id="history-recipient-list">
+            <div class="empty-msg">Click an email to view recipients</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Analytics Tab -->
+    <div id="analytics-tab" class="tab-content">
+      <div class="list-area" id="analytics-content" style="flex:1;overflow-y:auto;padding:12px;">
+        <div class="empty-msg">Loading analytics...</div>
+      </div>
     </div>
 
     <!-- Settings Tab -->
     <div id="settings-tab" class="tab-content">
-      <div style="padding: 10px 0;">
-        <div class="section-title">Gmail SMTP Credentials</div>
+      <div style="padding: 10px 0; overflow-y:auto; flex:1;">
+        <div class="section-title">SMTP Credentials</div>
         <div class="form-row">
-          <input type="text" id="s-email" placeholder="Gmail address">
+          <input type="text" id="s-sender-name" placeholder="Sender display name (e.g. Grace Community Church)">
         </div>
         <div class="form-row">
-          <input type="text" id="s-password" placeholder="App Password (leave blank to keep current)">
+          <input type="text" id="s-email" placeholder="Email address">
+        </div>
+        <div class="form-row">
+          <input type="password" id="s-password" placeholder="App Password (leave blank to keep current)">
+        </div>
+        <div class="form-row">
+          <input type="text" id="s-smtp-host" placeholder="SMTP Host (default: smtp.gmail.com)">
+          <input type="text" id="s-smtp-port" placeholder="Port (default: 587)" style="max-width:100px;">
         </div>
         <div class="btn-row" style="margin-top: 6px;">
           <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
           <button class="btn btn-primary btn-success" onclick="testConnection()">Test Connection</button>
+          <button class="btn btn-primary" onclick="sendTestEmail()">Send Test Email</button>
         </div>
         <div id="settings-status" class="settings-status"></div>
         <div class="section-title" style="margin-top:20px;">Time Zone</div>
@@ -1139,6 +1546,22 @@ HTML = r"""<!DOCTYPE html>
           <button class="btn btn-primary btn-nowrap" onclick="saveTimezone()">Save Timezone</button>
         </div>
         <div id="tz-status" class="settings-status"></div>
+
+        <div class="section-title" style="margin-top:20px;">Application</div>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+            <input type="checkbox" id="startup-toggle" onchange="toggleStartup(this.checked)">
+            Launch on startup (minimize to tray)
+          </label>
+        </div>
+        <div id="startup-status" class="settings-status"></div>
+
+        <div class="section-title" style="margin-top:20px;">Database</div>
+        <div class="btn-row">
+          <button class="btn btn-primary" onclick="backupDatabase()">Backup Database</button>
+          <button class="btn btn-danger" onclick="restoreDatabase()">Restore from Backup</button>
+        </div>
+        <div id="db-status" class="settings-status"></div>
       </div>
     </div>
   </div>
@@ -1154,6 +1577,7 @@ HTML = r"""<!DOCTYPE html>
         <option value="">Load template...</option>
       </select>
       <button class="btn btn-primary btn-sm" id="btn-save-template" onclick="saveAsTemplate()">Save Template</button>
+      <button class="btn btn-sm" onclick="duplicateTemplate()" title="Duplicate template">Dup</button>
       <button class="btn btn-danger btn-sm" onclick="deleteCurrentTemplate()">Del</button>
     </div>
     <div class="recipient-field">
@@ -1167,6 +1591,12 @@ HTML = r"""<!DOCTYPE html>
       <div class="autocomplete-dropdown" id="ac-dropdown"></div>
     </div>
     <div class="recipient-chips" id="recipient-chips"></div>
+    <div id="recipient-count-display" style="font-size:11px;color:var(--text-muted);margin-bottom:4px;display:none;"></div>
+    <span class="cc-bcc-toggle" id="cc-bcc-toggle" onclick="toggleCcBcc()">Show CC/BCC</span>
+    <div class="cc-bcc-row hidden" id="cc-bcc-fields">
+      <input type="text" id="cc-input" placeholder="CC (comma-separated emails)">
+      <input type="text" id="bcc-input" placeholder="BCC (comma-separated emails)">
+    </div>
     <input type="text" id="subject" placeholder="Subject">
     <div class="editor-container">
       <div id="editor"></div>
@@ -1212,7 +1642,11 @@ HTML = r"""<!DOCTYPE html>
         <button class="btn btn-primary btn-nowrap" id="btn-schedule" onclick="scheduleEmail()">Save &amp; Schedule</button>
       </div>
     </div>
-    <button class="btn-dispatch" id="btn-send-now" onclick="dispatchEmails()">Send Now</button>
+    <div style="display:flex;gap:6px;margin-top:4px;">
+      <button class="btn btn-primary" onclick="previewEmail()" style="flex:0;">Preview</button>
+      <button class="btn-dispatch" id="btn-send-now" onclick="dispatchEmails()" style="flex:1;">Send Now</button>
+    </div>
+    <span class="unsaved-dot" id="unsaved-dot" title="Unsaved changes"></span>
   </div>
 </div>
 
@@ -1233,6 +1667,21 @@ HTML = r"""<!DOCTYPE html>
       <button class="btn btn-primary btn-sm hidden" id="template-modal-save">Save</button>
     </div>
   </div>
+</div>
+
+<div class="preview-overlay" id="preview-overlay" onclick="if(event.target===this)this.classList.remove('show')">
+  <div class="preview-box">
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <h3>Email Preview</h3>
+      <button class="btn btn-sm" onclick="document.getElementById('preview-overlay').classList.remove('show')">Close</button>
+    </div>
+    <div class="preview-meta" id="preview-meta"></div>
+    <div class="preview-body" id="preview-body"></div>
+  </div>
+</div>
+
+<div class="spinner-overlay" id="spinner-overlay">
+  <div class="spinner"></div>
 </div>
 
 <script>
@@ -1312,47 +1761,104 @@ async function loadContacts() {
   renderContactList(cachedContacts);
 }
 
+var _contactSort = { col: 'name', dir: 'asc' };
+
+function sortContacts(contacts) {
+  var col = _contactSort.col, dir = _contactSort.dir;
+  return contacts.slice().sort(function(a, b) {
+    var va, vb;
+    if (col === 'name') { va = a.name.toLowerCase(); vb = b.name.toLowerCase(); }
+    else if (col === 'email') { va = a.email.toLowerCase(); vb = b.email.toLowerCase(); }
+    else if (col === 'email_count') { va = a.email_count || 0; vb = b.email_count || 0; }
+    else { va = a.name.toLowerCase(); vb = b.name.toLowerCase(); }
+    if (va < vb) return dir === 'asc' ? -1 : 1;
+    if (va > vb) return dir === 'asc' ? 1 : -1;
+    return 0;
+  });
+}
+
+window.toggleContactSort = function(col) {
+  if (_contactSort.col === col) {
+    _contactSort.dir = _contactSort.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    _contactSort.col = col;
+    _contactSort.dir = 'asc';
+  }
+  filterContacts();
+};
+
 function renderContactList(contacts) {
   const el = document.getElementById('contact-list');
   if (!contacts.length) { renderEmpty(el, 'No contacts yet.'); return; }
-  const header = `<div class="contact-header">
-    <span class="h-check"></span>
-    <span class="h-name">Name</span>
-    <span class="h-email">Email</span>
-    <span class="h-families">Families</span>
-    <span class="h-groups">Groups</span>
-    <span class="h-edit"></span>
-  </div>`;
-  const rows = contacts.map(c => {
+  var sortCls = function(col) {
+    if (_contactSort.col !== col) return '';
+    return ' sort-' + _contactSort.dir;
+  };
+  const header = '<div class="contact-header">' +
+    '<span class="h-check"></span>' +
+    '<span class="h-name" data-sort="name" onclick="toggleContactSort(\'name\')"' + sortCls('name') + '>Name</span>' +
+    '<span class="h-email" data-sort="email" onclick="toggleContactSort(\'email\')"' + sortCls('email') + '>Email</span>' +
+    '<span class="h-families">Families</span>' +
+    '<span class="h-groups">Groups</span>' +
+    '<span class="h-edit"></span>' +
+  '</div>';
+  var sorted = sortContacts(contacts);
+  const rows = sorted.map(c => {
     const famTags = (c.families && c.families.length)
-      ? c.families.map(f => `<span class="contact-tag fam-tag">${esc(f.name)}</span>`).join('')
+      ? c.families.map(f => '<span class="contact-tag fam-tag">' + esc(f.name) + '</span>').join('')
       : '<span style="font-size:11px;color:var(--text-dim);">-</span>';
     const grpTags = (c.groups && c.groups.length)
-      ? c.groups.map(g => `<span class="contact-tag grp-tag">${esc(g)}</span>`).join('')
+      ? c.groups.map(g => '<span class="contact-tag grp-tag">' + esc(g) + '</span>').join('')
       : '<span style="font-size:11px;color:var(--text-dim);">-</span>';
-    return `
-    <div class="contact-row" id="contact-row-${c.id}">
-      <input type="checkbox" data-id="${c.id}">
-      <span class="name">${esc(c.name)}</span>
-      <span class="email">${esc(c.email)}</span>
-      <span class="col-families">${famTags}</span>
-      <span class="col-groups">${grpTags}</span>
-      <button class="contact-edit-btn" onclick="editContact(${c.id})" title="Edit">&#9998;</button>
-    </div>`;
+    var badges = '';
+    if (c.opt_out) badges += ' <span class="opt-out-badge">Opted Out</span>';
+    var activity = '';
+    if (c.email_count > 0) activity = '<span style="font-size:10px;color:var(--text-muted);" title="Last emailed: ' + esc(c.last_emailed_at || 'Unknown') + '">' + c.email_count + ' emails</span>';
+    return '<div class="contact-row" id="contact-row-' + c.id + '">' +
+      '<input type="checkbox" data-id="' + c.id + '">' +
+      '<span class="name">' + esc(c.name) + badges + '</span>' +
+      '<span class="email">' + esc(c.email) + (c.phone ? ' <span style="color:var(--text-muted);font-size:10px;">' + esc(c.phone) + '</span>' : '') + '</span>' +
+      '<span class="col-families">' + famTags + '</span>' +
+      '<span class="col-groups">' + grpTags + ' ' + activity + '</span>' +
+      '<button class="contact-edit-btn" onclick="editContact(' + c.id + ')" title="Edit">&#9998;</button>' +
+    '</div>';
   }).join('');
   el.innerHTML = header + rows;
 }
 
 window.filterContacts = function() {
   const q = document.getElementById('search-contacts').value.toLowerCase().trim();
-  if (!q) { renderContactList(cachedContacts); return; }
-  const filtered = cachedContacts.filter(c =>
-    c.name.toLowerCase().includes(q) || c.email.toLowerCase().includes(q) ||
-    (c.families && c.families.some(f => f.name.toLowerCase().includes(q))) ||
-    (c.groups && c.groups.some(g => g.toLowerCase().includes(q)))
-  );
+  const catFilter = document.getElementById('filter-category').value;
+  const grpFilter = document.getElementById('filter-group').value;
+  const famFilter = document.getElementById('filter-family').value;
+  const optFilter = document.getElementById('filter-optout').value;
+  var filtered = cachedContacts;
+  if (q) {
+    filtered = filtered.filter(c =>
+      c.name.toLowerCase().includes(q) || c.email.toLowerCase().includes(q) ||
+      (c.phone && c.phone.toLowerCase().includes(q)) ||
+      (c.families && c.families.some(f => f.name.toLowerCase().includes(q))) ||
+      (c.groups && c.groups.some(g => g.toLowerCase().includes(q)))
+    );
+  }
+  if (catFilter) filtered = filtered.filter(c => c.category === catFilter);
+  if (grpFilter) filtered = filtered.filter(c => c.groups && c.groups.includes(grpFilter));
+  if (famFilter) filtered = filtered.filter(c => c.families && c.families.some(f => String(f.id) === famFilter));
+  if (optFilter === 'active') filtered = filtered.filter(c => !c.opt_out);
+  if (optFilter === 'optout') filtered = filtered.filter(c => c.opt_out);
   renderContactList(filtered);
 };
+
+function updateFilterDropdowns() {
+  var grpSel = document.getElementById('filter-group');
+  var famSel = document.getElementById('filter-family');
+  var gval = grpSel.value, fval = famSel.value;
+  grpSel.innerHTML = '<option value="">All groups</option>' +
+    cachedGroups.map(g => '<option value="' + esc(g.name) + '">' + esc(g.name) + '</option>').join('');
+  famSel.innerHTML = '<option value="">All families</option>' +
+    cachedFamilies.map(f => '<option value="' + f.id + '">' + esc(f.name) + '</option>').join('');
+  grpSel.value = gval; famSel.value = fval;
+}
 
 // ── Create modal helpers ──
 
@@ -1381,10 +1887,12 @@ window.openCreateContact = function() {
   showCreateModal(
     '<h3>New Contact</h3>' +
     '<div class="edit-row"><input type="text" id="cm-name" placeholder="Name"><input type="text" id="cm-email" placeholder="Email"></div>' +
+    '<div class="edit-row"><input type="text" id="cm-phone" placeholder="Phone (optional)"></div>' +
     '<div class="edit-row">' +
       '<select id="cm-category" onchange="document.getElementById(\'cm-family\').disabled = this.value !== \'Family\'"><option value="Single">Single</option><option value="Family">Family</option></select>' +
       '<select id="cm-family" disabled>' + famOptions + '</select>' +
     '</div>' +
+    '<div class="edit-row"><textarea id="cm-notes" placeholder="Notes (optional)" style="flex:1;padding:6px 10px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);resize:vertical;min-height:40px;font-family:inherit;"></textarea></div>' +
     '<div class="edit-actions"><button class="btn btn-sm" onclick="closeCreateModal()">Cancel</button><button class="btn btn-primary btn-sm" onclick="submitCreateContact()">Add</button></div>'
   );
   document.getElementById('cm-name').focus();
@@ -1395,8 +1903,10 @@ window.submitCreateContact = async function() {
   var email = document.getElementById('cm-email').value.trim();
   var category = document.getElementById('cm-category').value;
   var familyId = document.getElementById('cm-family').value || null;
+  var phone = document.getElementById('cm-phone').value.trim();
+  var notes = document.getElementById('cm-notes').value.trim();
   if (!name || !email) { showToast('Enter both name and email.', 'error'); return; }
-  var res = await pywebview.api.add_contact(name, email, category, familyId);
+  var res = await pywebview.api.add_contact(name, email, category, familyId, phone, notes);
   if (!res.ok) { showToast(res.error, 'error'); return; }
   closeCreateModal();
   loadContacts();
@@ -1441,6 +1951,16 @@ window.editContact = function(id) {
     '<div class="edit-row">' +
       '<input type="text" id="ce-name" value="' + esc(c.name).replace(/"/g, '&quot;') + '" placeholder="Name">' +
       '<input type="text" id="ce-email" value="' + esc(c.email).replace(/"/g, '&quot;') + '" placeholder="Email">' +
+    '</div>' +
+    '<div class="edit-row">' +
+      '<input type="text" id="ce-phone" value="' + esc(c.phone || '').replace(/"/g, '&quot;') + '" placeholder="Phone">' +
+    '</div>' +
+    '<div class="edit-row"><textarea id="ce-notes" placeholder="Notes" style="flex:1;padding:6px 10px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);resize:vertical;min-height:40px;font-family:inherit;">' + esc(c.notes || '') + '</textarea></div>' +
+    '<div class="edit-row" style="align-items:center;">' +
+      '<label style="font-size:12px;color:var(--text-muted);display:flex;align-items:center;gap:6px;cursor:pointer;">' +
+        '<input type="checkbox" id="ce-optout"' + (c.opt_out ? ' checked' : '') + '> Opt out of emails' +
+      '</label>' +
+      (c.email_count > 0 ? '<span style="font-size:11px;color:var(--text-muted);margin-left:auto;">' + c.email_count + ' emails sent' + (c.last_emailed_at ? ', last: ' + esc(c.last_emailed_at.split('T')[0]) : '') + '</span>' : '') +
     '</div>' +
     '<div class="edit-section-label">Families</div>' +
     '<div class="edit-member-list" id="ce-fam-list"></div>' +
@@ -1571,12 +2091,16 @@ window.ceAddGrp = function(grpId) {
 window.saveEditContact = async function() {
   var name = document.getElementById('ce-name').value.trim();
   var email = document.getElementById('ce-email').value.trim();
+  var phone = document.getElementById('ce-phone').value.trim();
+  var notes = document.getElementById('ce-notes').value.trim();
+  var optOut = document.getElementById('ce-optout').checked;
   if (!name || !email) { showToast('Enter both name and email.', 'error'); return; }
 
-  // Update contact name/email (keep existing category/family_id for backwards compat)
+  // Update contact name/email/phone/notes (keep existing category/family_id for backwards compat)
   var c = cachedContacts.find(x => x.id === _ceContactId);
-  var res = await pywebview.api.update_contact(_ceContactId, name, email, c ? c.category : 'Single', null);
+  var res = await pywebview.api.update_contact(_ceContactId, name, email, c ? c.category : 'Single', null, phone, notes);
   if (!res.ok) { showToast(res.error, 'error'); return; }
+  await pywebview.api.set_contact_opt_out(_ceContactId, optOut);
 
   // Family membership changes
   for (var i = 0; i < _cePendingFamRemoves.length; i++) {
@@ -1610,27 +2134,73 @@ async function loadFamilies() {
   await waitForApi();
   cachedFamilies = await pywebview.api.get_families();
   renderFamilyList(cachedFamilies);
+  renderFamilyDetail();
 }
+
+var _selectedFamilyId = null;
 
 function renderFamilyList(families) {
   const el = document.getElementById('family-list');
   if (!families.length) { renderEmpty(el, 'No families yet.'); return; }
   el.innerHTML = families.map(f => {
-    const members = f.members.length ? f.members.map(m => '<div class="member-row">' + esc(m.name) + '</div>').join('') : '<div class="member-row" style="color:var(--text-dim);">No members</div>';
-    return `
-      <div class="family-card">
-        <div class="fam-header">
-          <span class="fam-name" id="fam-name-${f.id}">${esc(f.name)}</span>
-          <span>
-            <button class="contact-edit-btn" onclick="editFamily(${f.id})" title="Edit">&#9998;</button>
-            <button class="btn btn-danger btn-sm" onclick="deleteFamily(${f.id})">Delete</button>
-          </span>
-        </div>
-        <div class="fam-members">${members}</div>
-      </div>
-    `;
+    var active = f.id === _selectedFamilyId ? ' active' : '';
+    return '<div class="group-item' + active + '" onclick="selectFamily(' + f.id + ')">' +
+      '<span class="group-name">' + esc(f.name) + '</span>' +
+      '<span class="group-count">' + f.members.length + '</span>' +
+    '</div>';
   }).join('');
 }
+
+window.selectFamily = function(id) {
+  _selectedFamilyId = id;
+  var q = document.getElementById('search-families').value.toLowerCase().trim();
+  if (q) { filterFamilies(); } else { renderFamilyList(cachedFamilies); }
+  renderFamilyDetail();
+};
+
+function renderFamilyDetail() {
+  var titleEl = document.getElementById('family-detail-title');
+  var actionsEl = document.getElementById('family-detail-actions');
+  var listEl = document.getElementById('family-member-list');
+  var searchEl = document.getElementById('search-family-members');
+
+  if (!_selectedFamilyId) {
+    titleEl.textContent = 'Select a family';
+    actionsEl.innerHTML = '';
+    listEl.innerHTML = '<div class="empty-msg">Click a family to view its members</div>';
+    searchEl.value = '';
+    return;
+  }
+
+  var family = cachedFamilies.find(f => f.id === _selectedFamilyId);
+  if (!family) { _selectedFamilyId = null; renderFamilyDetail(); return; }
+
+  titleEl.textContent = family.name;
+  actionsEl.innerHTML =
+    '<button class="contact-edit-btn" onclick="editFamily(' + family.id + ')" title="Edit">&#9998;</button> ' +
+    '<button class="btn btn-danger btn-sm" onclick="deleteFamily(' + family.id + ')">Delete</button>';
+
+  var mq = searchEl.value.toLowerCase().trim();
+  var members = family.members;
+  if (mq) {
+    members = members.filter(m => m.name.toLowerCase().includes(mq) || m.email.toLowerCase().includes(mq));
+  }
+
+  if (!members.length) {
+    listEl.innerHTML = '<div class="empty-msg">' + (mq ? 'No matching members' : 'No members in this family') + '</div>';
+  } else {
+    listEl.innerHTML = members.map(m =>
+      '<div class="group-member-row">' +
+        '<span class="gm-name">' + esc(m.name) + '</span>' +
+        '<span class="gm-email">' + esc(m.email) + '</span>' +
+      '</div>'
+    ).join('');
+  }
+}
+
+window.filterFamilyMembers = function() {
+  renderFamilyDetail();
+};
 
 window.filterFamilies = function() {
   const q = document.getElementById('search-families').value.toLowerCase().trim();
@@ -1777,7 +2347,7 @@ window.deleteFamily = async function(id) {
 // TABS
 // ══════════════════════════════════════════════════════════════════════════════
 
-const TABS = ['contacts', 'families', 'groups', 'scheduled', 'history', 'settings'];
+const TABS = ['contacts', 'families', 'groups', 'scheduled', 'history', 'analytics', 'settings'];
 window.switchTab = function(tab) {
   document.querySelectorAll('.tab-btn').forEach((b, i) => {
     b.classList.toggle('active', TABS[i] === tab);
@@ -1788,16 +2358,13 @@ window.switchTab = function(tab) {
   // Refresh data when switching to these tabs
   if (tab === 'scheduled') loadScheduled();
   if (tab === 'history') loadHistory();
+  if (tab === 'analytics') loadAnalytics();
 };
 
 
 // ══════════════════════════════════════════════════════════════════════════════
-// EMAIL DISPATCH
-// ══════════════════════════════════════════════════════════════════════════════
-
-// ═════════���═════════════════════════════════��══════════════════════════════════
 // ATTACHMENTS
-// ═════════���═════════════════════���══════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 
 var attachedFiles = [];
 
@@ -1827,9 +2394,9 @@ window.removeAttachment = function(idx) {
   renderAttachChips();
 };
 
-// ═══════���══════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 // EMAIL DISPATCH
-// ══════════════════���════════════════════════════════��══════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 
 window.dispatchEmails = async function() {
   const subject = document.getElementById('subject').value.trim();
@@ -1846,7 +2413,7 @@ window.dispatchEmails = async function() {
   let contactIds = Array.from(checks).map(cb => parseInt(cb.dataset.id));
 
   // Get recipients from the recipient field
-  const { targetType, targetId, manualEmails } = getRecipientSelection();
+  const { targetType, targetId, targets, manualEmails } = getRecipientSelection();
 
   if (contactIds.length) {
     if (!confirm('Send to ' + contactIds.length + ' selected contact(s)?')) return;
@@ -1861,11 +2428,13 @@ window.dispatchEmails = async function() {
   const paths = attachedFiles.map(f => f.path);
   const sendBtn = document.querySelector('.btn-dispatch');
   sendBtn.disabled = true;
-  showToast('Sending emails...', 'success');
+  var ccBcc = getCcBcc();
+  showSpinner();
   try {
     const res = await pywebview.api.dispatch_emails(
       subject, htmlBody, plainText, contactIds, paths,
-      targetType || 'manual', targetId, manualEmails
+      targetType || 'manual', targetId, manualEmails, targets,
+      ccBcc.cc, ccBcc.bcc
     );
     if (res.error) {
       showToast('Error: ' + res.error, 'error');
@@ -1873,9 +2442,11 @@ window.dispatchEmails = async function() {
       let msg = 'Sent: ' + res.sent;
       if (res.failed) msg += ' | Failed: ' + res.failed;
       showToast(msg, 'success');
+      markComposerClean();
     }
   } finally {
     sendBtn.disabled = false;
+    hideSpinner();
   }
 };
 
@@ -2056,9 +2627,14 @@ document.addEventListener('DOMContentLoaded', function() {
       e.preventDefault();
       const val = input.value.trim();
       if (!val) return;
+      var emailRe = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
       val.split(/[,;]+/).forEach(function(email) {
         email = email.trim();
-        if (email) addRecipient({ type: 'email', value: email, label: email });
+        if (email && emailRe.test(email)) {
+          addRecipient({ type: 'email', value: email, label: email });
+        } else if (email) {
+          showToast('Invalid email: ' + email, 'error');
+        }
       });
       input.value = '';
       hideAcDropdown();
@@ -2093,22 +2669,25 @@ window.onTargetSelect = function() {
 };
 
 function getRecipientSelection() {
-  // Returns { targetType, targetId, contactIds, manualEmails } for dispatch
+  // Returns { targets, manualEmails } for dispatch
+  // targets is an array of { type, id } to support multiple selections
   const manualEmails = [];
-  let targetType = null, targetId = null;
+  const targets = [];
 
   for (const r of recipientList) {
     if (r.type === 'email') {
       manualEmails.push(r.value);
     } else if (r.type === 'group') {
-      targetType = 'group';
-      targetId = parseInt(r.value);
+      targets.push({ type: 'group', id: parseInt(r.value) });
     } else {
       // all, family, single
-      targetType = r.type;
+      targets.push({ type: r.type, id: null });
     }
   }
-  return { targetType, targetId, manualEmails };
+  // For backwards compat, flatten to first target if only one
+  const targetType = targets.length ? targets[0].type : null;
+  const targetId = targets.length ? targets[0].id : null;
+  return { targetType, targetId, targets, manualEmails };
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -2119,6 +2698,9 @@ async function loadSettings() {
   await waitForApi();
   const s = await pywebview.api.get_settings();
   document.getElementById('s-email').value = s.email;
+  document.getElementById('s-sender-name').value = s.sender_name || '';
+  document.getElementById('s-smtp-host').value = (s.smtp_host && s.smtp_host !== 'smtp.gmail.com') ? s.smtp_host : '';
+  document.getElementById('s-smtp-port').value = (s.smtp_port && s.smtp_port !== '587') ? s.smtp_port : '';
   document.getElementById('s-password').placeholder =
     s.has_password ? 'App Password (saved — leave blank to keep)' : 'App Password';
   const tzSel = document.getElementById('s-timezone');
@@ -2134,14 +2716,33 @@ async function loadSettings() {
       tzSel.value = s.timezone;
     }
   }
+  const startupToggle = document.getElementById('startup-toggle');
+  if (startupToggle) startupToggle.checked = !!s.launch_on_startup;
 }
+
+window.toggleStartup = async function(enabled) {
+  const statusEl = document.getElementById('startup-status');
+  const res = await pywebview.api.set_launch_on_startup(enabled);
+  if (res.ok) {
+    statusEl.textContent = enabled ? 'App will launch on startup' : 'Startup disabled';
+    statusEl.style.color = 'var(--success)';
+  } else {
+    statusEl.textContent = 'Error: ' + res.error;
+    statusEl.style.color = 'var(--danger)';
+    document.getElementById('startup-toggle').checked = !enabled;
+  }
+  setTimeout(() => { statusEl.textContent = ''; }, 3000);
+};
 
 window.saveSettings = async function() {
   const email = document.getElementById('s-email').value.trim();
   const password = document.getElementById('s-password').value.trim();
+  const senderName = document.getElementById('s-sender-name').value.trim();
+  const smtpHost = document.getElementById('s-smtp-host').value.trim();
+  const smtpPort = document.getElementById('s-smtp-port').value.trim();
   if (!email) { showToast('Enter an email address.', 'error'); return; }
 
-  const res = await pywebview.api.save_settings(email, password);
+  const res = await pywebview.api.save_settings(email, password, senderName, smtpHost, smtpPort);
   if (res.ok) {
     showToast('Settings saved.', 'success');
     document.getElementById('s-password').value = '';
@@ -2154,12 +2755,14 @@ window.saveSettings = async function() {
 window.testConnection = async function() {
   const email = document.getElementById('s-email').value.trim();
   const password = document.getElementById('s-password').value.trim();
+  const smtpHost = document.getElementById('s-smtp-host').value.trim();
+  const smtpPort = document.getElementById('s-smtp-port').value.trim();
   if (!email || !password) {
     showToast('Enter both email and password to test.', 'error');
     return;
   }
   document.getElementById('settings-status').textContent = 'Testing connection...';
-  const res = await pywebview.api.test_email_connection(email, password);
+  const res = await pywebview.api.test_email_connection(email, password, smtpHost, smtpPort);
   if (res.ok) {
     document.getElementById('settings-status').innerHTML = '<span style="color:var(--success)">Connection successful!</span>';
   } else {
@@ -2194,6 +2797,7 @@ async function loadGroups() {
   const base = '<option value="">-- Quick select --</option><option value="all">All Contacts</option><option value="family">All Families</option><option value="single">All Singles</option>';
   const groupOpts = cachedGroups.map(g => '<option value="group:' + g.id + '">Group: ' + esc(g.name) + '</option>').join('');
   tsel.innerHTML = base + groupOpts;
+  updateFilterDropdowns();
 }
 
 var _selectedGroupId = null;
@@ -2496,7 +3100,15 @@ function renderScheduleCalendar() {
         var time = (e.scheduled_at.split('T')[1] || '').substring(0, 5);
         var recipNames = e.recipients.map(function(r) { return r.name || r.email; });
         var recipShort = recipNames.length <= 2 ? recipNames.join(', ') : recipNames.slice(0,2).join(', ') + ' +' + (recipNames.length - 2) + ' more';
-        var cancelBtn = e.status === 'pending' ? '<button class="btn btn-danger btn-sm" style="font-size:10px;padding:1px 6px;margin-left:6px;" onclick="event.stopPropagation();cancelScheduled(' + e.id + ')">Cancel</button>' : '';
+        var actionBtns = '';
+        if (e.status === 'pending') {
+          actionBtns = '<button class="btn btn-primary btn-sm" style="font-size:10px;padding:1px 6px;margin-left:4px;" onclick="event.stopPropagation();editScheduledEmail(' + e.id + ')" title="Edit">Edit</button>';
+          actionBtns += '<button class="btn btn-sm" style="font-size:10px;padding:1px 6px;margin-left:2px;" onclick="event.stopPropagation();duplicateScheduledEmail(' + e.id + ')" title="Duplicate">Dup</button>';
+          actionBtns += '<button class="btn btn-danger btn-sm" style="font-size:10px;padding:1px 6px;margin-left:2px;" onclick="event.stopPropagation();cancelScheduled(' + e.id + ')">Cancel</button>';
+        } else {
+          actionBtns = '<button class="btn btn-sm" style="font-size:10px;padding:1px 6px;margin-left:4px;" onclick="event.stopPropagation();duplicateScheduledEmail(' + e.id + ')" title="Duplicate">Dup</button>';
+        }
+        var cancelBtn = actionBtns;
 
         // Recurrence label
         var recInfo = '';
@@ -2522,6 +3134,7 @@ function renderScheduleCalendar() {
         html += '<div class="sched-card-meta">';
         html += '<span>' + esc(time) + '</span>';
         html += '<span class="sched-card-status" style="color:' + statusColor + '">' + e.status + '</span>';
+        if (e.recurrence && e.recurrence.type !== 'once') html += '<span class="recur-badge">' + esc(e.recurrence.type.replace(/_/g, ' ')) + '</span>';
         html += '<span>' + esc(recipShort) + '</span>';
         html += cancelBtn;
         html += '</div>';
@@ -2579,6 +3192,9 @@ function clearComposer() {
   renderAttachChips();
   document.getElementById('template-select').value = '';
   document.getElementById('target-select').value = '';
+  document.getElementById('cc-input').value = '';
+  document.getElementById('bcc-input').value = '';
+  document.getElementById('recipient-count-display').style.display = 'none';
   setComposerDisabled(false);
 }
 
@@ -2928,21 +3544,97 @@ window.exportCSV = async function() {
 // EMAIL HISTORY
 // ══════════════════════════════════════════════════════════════════════════════
 
+var cachedHistory = [];
+var _selectedHistoryId = null;
+var _cachedHistoryDetails = [];
+
 async function loadHistory() {
   await waitForApi();
-  const history = await pywebview.api.get_email_history();
+  cachedHistory = await pywebview.api.get_email_history();
+  renderHistoryList(cachedHistory);
+  renderHistoryDetail();
+}
+
+function renderHistoryList(history) {
   const el = document.getElementById('history-list');
   if (!history.length) { renderEmpty(el, 'No email history yet.'); return; }
   el.innerHTML = history.map(h => {
-    const sentColor = h.failed > 0 ? 'var(--accent)' : 'var(--success)';
-    return renderCard(
-      esc(h.subject),
-      '<span style="font-size:11px;color:' + sentColor + '">' + h.sent + '/' + h.recipients + ' sent</span>',
-      'Target: ' + esc(h.target || 'all') + ' | ' + esc(h.sent_at) +
-        (h.failed > 0 ? ' | <span style="color:var(--danger)">' + h.failed + ' failed</span>' : '')
-    );
+    var active = h.id === _selectedHistoryId ? ' active' : '';
+    var statusIcon = h.failed > 0 ? '<span style="color:var(--danger);">\u2716</span>' : '<span style="color:var(--success);">\u2714</span>';
+    return '<div class="group-item' + active + '" onclick="selectHistory(' + h.id + ')">' +
+      '<span class="group-name">' + statusIcon + ' ' + esc(h.subject) + '</span>' +
+      '<span class="group-count">' + h.sent + '/' + h.recipients + '</span>' +
+    '</div>';
   }).join('');
 }
+
+window.selectHistory = async function(id) {
+  _selectedHistoryId = id;
+  var q = document.getElementById('search-history').value.toLowerCase().trim();
+  if (q) { filterHistory(); } else { renderHistoryList(cachedHistory); }
+  _cachedHistoryDetails = await pywebview.api.get_email_history_details(id);
+  renderHistoryDetail();
+};
+
+function renderHistoryDetail() {
+  var titleEl = document.getElementById('history-detail-title');
+  var metaEl = document.getElementById('history-detail-meta');
+  var listEl = document.getElementById('history-recipient-list');
+  var searchEl = document.getElementById('search-history-recipients');
+
+  if (!_selectedHistoryId) {
+    titleEl.textContent = 'Select an email';
+    metaEl.innerHTML = '';
+    listEl.innerHTML = '<div class="empty-msg">Click an email to view recipients</div>';
+    searchEl.value = '';
+    return;
+  }
+
+  var h = cachedHistory.find(x => x.id === _selectedHistoryId);
+  if (!h) { _selectedHistoryId = null; renderHistoryDetail(); return; }
+
+  titleEl.textContent = h.subject;
+  var statusText = h.failed > 0
+    ? '<span style="color:var(--danger);">' + h.failed + ' failed</span>, ' + h.sent + ' sent'
+    : '<span style="color:var(--success);">All ' + h.sent + ' sent successfully</span>';
+  metaEl.innerHTML = 'Target: ' + esc(h.target || 'all') + ' &bull; ' + esc(h.sent_at) + '<br>' + statusText;
+
+  var mq = searchEl.value.toLowerCase().trim();
+  var details = _cachedHistoryDetails;
+  if (mq) {
+    details = details.filter(d => d.name.toLowerCase().includes(mq) || d.email.toLowerCase().includes(mq));
+  }
+
+  if (!details.length && !_cachedHistoryDetails.length) {
+    listEl.innerHTML = '<div class="empty-msg">No recipient details recorded for this email</div>';
+  } else if (!details.length) {
+    listEl.innerHTML = '<div class="empty-msg">No matching recipients</div>';
+  } else {
+    listEl.innerHTML = details.map(d => {
+      var errorHtml = d.error ? '<span class="hist-error" title="' + esc(d.error) + '">' + esc(d.error) + '</span>' : '';
+      return '<div class="hist-recipient-row">' +
+        '<span class="hist-status ' + d.status + '">' + d.status + '</span>' +
+        '<span class="gm-name">' + esc(d.name || d.email) + '</span>' +
+        '<span class="gm-email">' + esc(d.email) + '</span>' +
+        errorHtml +
+      '</div>';
+    }).join('');
+  }
+}
+
+window.filterHistoryRecipients = function() {
+  renderHistoryDetail();
+};
+
+window.filterHistory = function() {
+  const q = document.getElementById('search-history').value.toLowerCase().trim();
+  if (!q) { renderHistoryList(cachedHistory); return; }
+  const filtered = cachedHistory.filter(h =>
+    h.subject.toLowerCase().includes(q) ||
+    (h.target || '').toLowerCase().includes(q)
+  );
+  renderHistoryList(filtered);
+};
 
 // ── Initial load (single wait, then sequential to avoid race conditions) ──
 // ══════════════════════════════════════════════════════════════════════════════
@@ -2995,6 +3687,404 @@ async function loadHistory() {
   });
 })();
 
+// ══════════════════════════════════════════════════════════════════════════════
+// CC/BCC TOGGLE
+// ══════════════════════════════════════════════════════════════════════════════
+
+window.toggleCcBcc = function() {
+  var fields = document.getElementById('cc-bcc-fields');
+  var toggle = document.getElementById('cc-bcc-toggle');
+  fields.classList.toggle('hidden');
+  toggle.textContent = fields.classList.contains('hidden') ? 'Show CC/BCC' : 'Hide CC/BCC';
+};
+
+function getCcBcc() {
+  var cc = document.getElementById('cc-input').value.trim();
+  var bcc = document.getElementById('bcc-input').value.trim();
+  var ccList = cc ? cc.split(/[,;]+/).map(function(e){ return e.trim(); }).filter(Boolean) : [];
+  var bccList = bcc ? bcc.split(/[,;]+/).map(function(e){ return e.trim(); }).filter(Boolean) : [];
+  return { cc: ccList.length ? ccList : null, bcc: bccList.length ? bccList : null };
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EMAIL PREVIEW
+// ══════════════════════════════════════════════════════════════════════════════
+
+window.previewEmail = async function() {
+  var subject = document.getElementById('subject').value.trim();
+  var htmlBody = getEditorHTML();
+  if (!subject) { showToast('Enter a subject first.', 'error'); return; }
+
+  // Resolve recipient count
+  var checks = document.querySelectorAll('#contact-list input[type="checkbox"]:checked');
+  var contactIds = Array.from(checks).map(function(cb){ return parseInt(cb.dataset.id); });
+  var sel = getRecipientSelection();
+  var countRes = await pywebview.api.get_recipient_count(contactIds, sel.targets, sel.manualEmails, sel.targetType, sel.targetId);
+
+  var meta = '<strong>Subject:</strong> ' + esc(subject) + '<br>';
+  meta += '<strong>Recipients:</strong> ' + countRes.count + ' recipient(s)';
+  if (countRes.count > 0 && countRes.count <= 10) {
+    meta += ' — ' + countRes.recipients.map(function(r){ return esc(r.name || r.email); }).join(', ');
+  }
+  var cc = getCcBcc();
+  if (cc.cc) meta += '<br><strong>CC:</strong> ' + esc(cc.cc.join(', '));
+  if (cc.bcc) meta += '<br><strong>BCC:</strong> ' + esc(cc.bcc.join(', '));
+
+  document.getElementById('preview-meta').innerHTML = meta;
+  document.getElementById('preview-body').innerHTML = htmlBody;
+  document.getElementById('preview-overlay').classList.add('show');
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// RECIPIENT COUNT DISPLAY
+// ══════════════════════════════════════════════════════════════════════════════
+
+var _recipCountDebounce = null;
+function updateRecipientCount() {
+  clearTimeout(_recipCountDebounce);
+  _recipCountDebounce = setTimeout(async function() {
+    var el = document.getElementById('recipient-count-display');
+    if (!recipientList.length) { el.style.display = 'none'; return; }
+    try {
+      var sel = getRecipientSelection();
+      var res = await pywebview.api.get_recipient_count([], sel.targets, sel.manualEmails, sel.targetType, sel.targetId);
+      el.textContent = res.count + ' recipient(s) will receive this email';
+      el.style.display = 'block';
+    } catch(e) { el.style.display = 'none'; }
+  }, 300);
+}
+
+// Patch renderRecipients to also update count
+var _origRenderRecipients = renderRecipients;
+renderRecipients = function() {
+  _origRenderRecipients();
+  updateRecipientCount();
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// LOADING SPINNER
+// ══════════════════════════════════════════════════════════════════════════════
+
+function showSpinner() { document.getElementById('spinner-overlay').classList.add('show'); }
+function hideSpinner() { document.getElementById('spinner-overlay').classList.remove('show'); }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// KEYBOARD SHORTCUTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+document.addEventListener('keydown', function(e) {
+  // Ctrl/Cmd + Enter = Send Now
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+    var sendBtn = document.getElementById('btn-send-now');
+    if (sendBtn && !sendBtn.disabled) {
+      e.preventDefault();
+      dispatchEmails();
+    }
+    return;
+  }
+  // Escape = close modals or clear composer
+  if (e.key === 'Escape') {
+    var preview = document.getElementById('preview-overlay');
+    if (preview.classList.contains('show')) { preview.classList.remove('show'); return; }
+    var templateModal = document.getElementById('template-save-modal');
+    if (templateModal.classList.contains('show')) { closeTemplateModal(); return; }
+    var createModal = document.getElementById('create-modal');
+    if (createModal.classList.contains('show')) { closeCreateModal(); return; }
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// UNSAVED CHANGES WARNING
+// ══════════════════════════════════════════════════════════════════════════════
+
+var _composerDirty = false;
+function markComposerDirty() {
+  _composerDirty = true;
+  var dot = document.getElementById('unsaved-dot');
+  if (dot) dot.classList.add('show');
+}
+function markComposerClean() {
+  _composerDirty = false;
+  var dot = document.getElementById('unsaved-dot');
+  if (dot) dot.classList.remove('show');
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  var subj = document.getElementById('subject');
+  if (subj) subj.addEventListener('input', markComposerDirty);
+  if (quill) quill.on('text-change', markComposerDirty);
+});
+
+// Override clearComposer to mark clean
+var _origClearComposer = clearComposer;
+clearComposer = function() {
+  _origClearComposer();
+  markComposerClean();
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// BULK OPERATIONS
+// ══════════════════════════════════════════════════════════════════════════════
+
+window.bulkCategoryChange = async function() {
+  var checks = document.querySelectorAll('#contact-list input[type="checkbox"]:checked');
+  var ids = Array.from(checks).map(function(cb){ return parseInt(cb.dataset.id); });
+  if (!ids.length) { showToast('Select contacts first.', 'error'); return; }
+  var cat = prompt('Enter new category (Family or Single):');
+  if (!cat || (cat !== 'Family' && cat !== 'Single')) { showToast('Category must be "Family" or "Single".', 'error'); return; }
+  await pywebview.api.bulk_update_category(ids, cat);
+  showToast('Updated ' + ids.length + ' contact(s).', 'success');
+  loadContacts();
+};
+
+window.bulkAddToGroup = async function() {
+  var checks = document.querySelectorAll('#contact-list input[type="checkbox"]:checked');
+  var ids = Array.from(checks).map(function(cb){ return parseInt(cb.dataset.id); });
+  if (!ids.length) { showToast('Select contacts first.', 'error'); return; }
+  var groupNames = cachedGroups.map(function(g){ return g.name; });
+  var name = prompt('Enter group name to add to:\\n' + groupNames.join(', '));
+  if (!name) return;
+  var grp = cachedGroups.find(function(g){ return g.name.toLowerCase() === name.toLowerCase(); });
+  if (!grp) { showToast('Group not found.', 'error'); return; }
+  await pywebview.api.bulk_add_to_group(grp.id, ids);
+  showToast('Added ' + ids.length + ' contact(s) to ' + grp.name + '.', 'success');
+  loadContacts();
+  loadGroups();
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SETTINGS (extended)
+// ══════════════════════════════════════════════════════════════════════════════
+
+window.sendTestEmail = async function() {
+  showSpinner();
+  try {
+    var res = await pywebview.api.send_test_email();
+    if (res.ok) {
+      showToast('Test email sent to your address!', 'success');
+    } else {
+      showToast('Test failed: ' + res.error, 'error');
+    }
+  } finally { hideSpinner(); }
+};
+
+window.backupDatabase = async function() {
+  var res = await pywebview.api.backup_database();
+  if (res.ok) {
+    document.getElementById('db-status').innerHTML = '<span style="color:var(--success)">Backup saved to: ' + esc(res.path) + '</span>';
+  } else {
+    document.getElementById('db-status').innerHTML = '<span style="color:var(--danger)">' + esc(res.error) + '</span>';
+  }
+};
+
+window.restoreDatabase = async function() {
+  if (!confirm('This will replace the current database. Are you sure?')) return;
+  var res = await pywebview.api.restore_database();
+  if (res.ok) {
+    showToast('Database restored! Reloading data...', 'success');
+    loadContacts(); loadFamilies(); loadGroups(); loadScheduled(); loadHistory(); loadTemplates(); refreshAcCache();
+  } else {
+    showToast('Restore failed: ' + res.error, 'error');
+  }
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ANALYTICS
+// ══════════════════════════════════════════════════════════════════════════════
+
+async function loadAnalytics() {
+  await waitForApi();
+  var data = await pywebview.api.get_analytics();
+  var el = document.getElementById('analytics-content');
+
+  var html = '<div class="analytics-grid">';
+  html += '<div class="analytics-card"><div class="analytics-stat">' + data.totals.emails_sent + '</div><div class="analytics-label">Total Emails Sent</div></div>';
+  html += '<div class="analytics-card"><div class="analytics-stat">' + data.totals.recipients_reached + '</div><div class="analytics-label">Recipients Reached</div></div>';
+  html += '<div class="analytics-card"><div class="analytics-stat">' + data.totals.failure_rate + '%</div><div class="analytics-label">Failure Rate</div></div>';
+  html += '</div>';
+
+  // Weekly chart (text-based)
+  if (data.weekly.length) {
+    html += '<div class="analytics-card"><h4>Emails Per Week (Last 12 Weeks)</h4>';
+    var maxSent = Math.max.apply(null, data.weekly.map(function(w){ return w.sent; })) || 1;
+    data.weekly.forEach(function(w) {
+      var pct = Math.round((w.sent / maxSent) * 100);
+      html += '<div class="analytics-bar">' +
+        '<span style="width:80px;flex-shrink:0;">' + esc(w.week) + '</span>' +
+        '<div style="flex:1;background:var(--border);border-radius:4px;height:8px;">' +
+          '<div class="analytics-bar-fill" style="width:' + pct + '%;"></div>' +
+        '</div>' +
+        '<span style="width:50px;text-align:right;">' + w.sent + '</span>' +
+      '</div>';
+    });
+    html += '</div>';
+  }
+
+  // Most failed recipients
+  if (data.top_failed.length) {
+    html += '<div class="analytics-card"><h4>Most Failed Recipients</h4>';
+    data.top_failed.forEach(function(r) {
+      html += '<div style="font-size:12px;padding:3px 0;display:flex;justify-content:space-between;">' +
+        '<span>' + esc(r.name || r.email) + ' <span style="color:var(--text-muted);">' + esc(r.email) + '</span></span>' +
+        '<span style="color:var(--danger);font-weight:600;">' + r.count + ' failures</span>' +
+      '</div>';
+    });
+    html += '</div>';
+  }
+
+  el.innerHTML = html;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// HISTORY DATE FILTER
+// ══════════════════════════════════════════════════════════════════════════════
+
+window.filterHistoryByDate = async function() {
+  var start = document.getElementById('history-start-date').value;
+  var end = document.getElementById('history-end-date').value;
+  if (!start && !end) { loadHistory(); return; }
+  var endStr = end ? end + 'T23:59:59' : null;
+  var startStr = start ? start + 'T00:00:00' : null;
+  cachedHistory = await pywebview.api.get_email_history_filtered(startStr, endStr);
+  renderHistoryList(cachedHistory);
+};
+
+window.clearHistoryDateFilter = function() {
+  document.getElementById('history-start-date').value = '';
+  document.getElementById('history-end-date').value = '';
+  loadHistory();
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// AUTOCOMPLETE SHOW MORE
+// ══════════════════════════════════════════════════════════════════════════════
+
+var _acShowAll = false;
+var _acLastQuery = '';
+
+// Override acSearch to support show more
+var _origAcSearch = acSearch;
+acSearch = function(query) {
+  _acLastQuery = query;
+  var q = query.toLowerCase();
+  var results = [];
+  for (var i = 0; i < acCache.contacts.length; i++) {
+    var c = acCache.contacts[i];
+    if (c.name.toLowerCase().includes(q) || c.email.toLowerCase().includes(q)) {
+      results.push({ type: 'contact', id: c.id, name: c.name, detail: c.email, label: c.name + ' <' + c.email + '>' });
+    }
+  }
+  for (var j = 0; j < acCache.families.length; j++) {
+    var f = acCache.families[j];
+    if (f.name.toLowerCase().includes(q)) {
+      var cnt = f.members ? f.members.length : 0;
+      results.push({ type: 'family', id: f.id, name: f.name, detail: cnt + ' member' + (cnt !== 1 ? 's' : ''), label: 'Family: ' + f.name });
+    }
+  }
+  for (var k = 0; k < acCache.groups.length; k++) {
+    var g = acCache.groups[k];
+    if (g.name.toLowerCase().includes(q)) {
+      var gcnt = g.members ? g.members.length : 0;
+      results.push({ type: 'group', id: g.id, name: g.name, detail: gcnt + ' member' + (gcnt !== 1 ? 's' : ''), label: 'Group: ' + g.name });
+    }
+  }
+  var limit = _acShowAll ? 100 : 15;
+  var total = results.length;
+  results = results.slice(0, limit);
+  if (total > limit) {
+    results.push({ type: 'more', name: 'Show all ' + total + ' results...', detail: '', label: '', _isMore: true });
+  }
+  return results;
+};
+
+// Override showAcDropdown to handle "show more"
+var _origShowAcDropdown = showAcDropdown;
+showAcDropdown = function(results) {
+  var dd = document.getElementById('ac-dropdown');
+  if (!results.length) { dd.classList.remove('show'); return; }
+  acHighlightIdx = -1;
+  dd.innerHTML = results.map(function(r, i) {
+    if (r._isMore) {
+      return '<div class="ac-item" data-idx="' + i + '" style="color:var(--accent);font-weight:600;justify-content:center;">' + esc(r.name) + '</div>';
+    }
+    return '<div class="ac-item" data-idx="' + i + '">' +
+      '<span class="ac-type ' + r.type + '">' + r.type + '</span>' +
+      '<span class="ac-name">' + esc(r.name) + '</span>' +
+      '<span class="ac-detail">' + esc(r.detail) + '</span>' +
+    '</div>';
+  }).join('');
+  dd.classList.add('show');
+  dd.querySelectorAll('.ac-item').forEach(function(item, i) {
+    item.addEventListener('mousedown', function(e) {
+      e.preventDefault();
+      if (results[i]._isMore) {
+        _acShowAll = true;
+        var newResults = acSearch(_acLastQuery);
+        showAcDropdown(newResults);
+        _acShowAll = false;
+        return;
+      }
+      selectAcResult(results[i]);
+    });
+  });
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SCHEDULED EMAIL EDIT & DUPLICATE
+// ══════════════════════════════════════════════════════════════════════════════
+
+window.editScheduledEmail = async function(emailId) {
+  var detail = await pywebview.api.get_scheduled_email_detail(emailId);
+  if (!detail || detail.status !== 'pending') { showToast('Can only edit pending emails.', 'error'); return; }
+  // Fill composer with data
+  document.getElementById('subject').value = detail.subject || '';
+  if (detail.html_body) quill.root.innerHTML = detail.html_body;
+  else quill.setText(detail.plain_text || '');
+  recipientList = detail.recipients.map(function(r) {
+    return { type: 'email', value: r.email, label: r.name ? r.name + ' <' + r.email + '>' : r.email };
+  });
+  renderRecipients();
+  if (detail.scheduled_at) document.getElementById('sched-datetime').value = detail.scheduled_at.substring(0, 16);
+  if (detail.recurrence) {
+    document.getElementById('recurrence-type').value = detail.recurrence.type || 'once';
+    onRecurrenceChange();
+    if (detail.recurrence.days) {
+      document.querySelectorAll('.day-btn').forEach(function(btn) {
+        btn.classList.toggle('active', detail.recurrence.days.indexOf(parseInt(btn.dataset.day)) !== -1);
+      });
+    }
+    if (detail.recurrence.day_of_month) document.getElementById('month-day').value = detail.recurrence.day_of_month;
+    if (detail.recurrence.end_date) document.getElementById('recurrence-end-date').value = detail.recurrence.end_date.substring(0, 16);
+  }
+  setComposerDisabled(false);
+  // Cancel the old one and let user reschedule
+  await pywebview.api.cancel_scheduled_email(emailId);
+  showToast('Editing scheduled email. Save & Schedule when ready.', 'success');
+  loadScheduled();
+};
+
+window.duplicateScheduledEmail = async function(emailId) {
+  var res = await pywebview.api.duplicate_scheduled_email(emailId);
+  if (res.ok) {
+    showToast('Email duplicated. Edit the new copy in the calendar.', 'success');
+    loadScheduled();
+  } else {
+    showToast(res.error, 'error');
+  }
+};
+
+window.duplicateTemplate = async function() {
+  var sel = document.getElementById('template-select');
+  if (!sel.value) { showToast('Select a template to duplicate.', 'error'); return; }
+  var res = await pywebview.api.duplicate_template(parseInt(sel.value));
+  if (res.ok) {
+    showToast('Template duplicated.', 'success');
+    loadTemplates();
+  } else {
+    showToast(res.error, 'error');
+  }
+};
+
 // ── Initial load (single wait, then sequential to avoid race conditions) ──
 (async function initApp() {
   await waitForApi();
@@ -3006,6 +4096,7 @@ async function loadHistory() {
   await loadTemplates();
   await loadSettings();
   await refreshAcCache();
+  updateFilterDropdowns();
 
   // Restore UI settings (theme + panel ratio)
   var theme = await pywebview.api.get_ui_setting('theme');
@@ -3027,22 +4118,233 @@ async function loadHistory() {
 </html>"""
 
 
+# ── System Tray ─────────────────────────────────────────────────────────────
+
+def _create_tray_icon_image():
+    """Generate a simple colored icon (no external file needed)."""
+    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    # Blue circle with white cross
+    draw.ellipse([4, 4, 60, 60], fill=(59, 130, 246))
+    draw.line([32, 18, 32, 46], fill="white", width=4)
+    draw.line([18, 32, 46, 32], fill="white", width=4)
+    return img
+
+
+_tray_icon = None          # pystray (Windows only)
+_webview_window = None
+_mac_status_item = None    # NSStatusItem (macOS only)
+_mac_tray_helper = None    # prevent GC (macOS only)
+
+
+def _show_window(icon=None, item=None):
+    """Show the pywebview window from the tray."""
+    if _webview_window is not None:
+        _webview_window.show()
+        _webview_window.restore()
+
+
+def _quit_app(icon=None, item=None):
+    """Fully quit: destroy tray icon and close window."""
+    global _tray_icon, _mac_status_item
+    if platform.system() == "Darwin" and _mac_status_item is not None:
+        from AppKit import NSStatusBar
+        NSStatusBar.systemStatusBar().removeStatusItem_(_mac_status_item)
+        _mac_status_item = None
+    elif _tray_icon is not None:
+        _tray_icon.stop()
+        _tray_icon = None
+    if _webview_window is not None:
+        _webview_window.destroy()
+
+
+def _on_window_closing():
+    """Intercept window close — hide to tray instead of quitting."""
+    if _webview_window is not None:
+        _webview_window.hide()
+    return False  # prevent actual close
+
+
+# ── macOS tray via pyobjc (shares main thread with pywebview) ───────────────
+
+def _setup_mac_tray():
+    """Called in background thread by webview.start(func=...).
+    Dispatches NSStatusBarItem creation to the main thread."""
+    import io as _io
+    from Foundation import NSObject, NSData
+    from AppKit import (NSStatusBar, NSVariableStatusItemLength,
+                        NSMenu, NSMenuItem, NSImage)
+    import objc
+
+    class _TrayDelegate(NSObject):
+        def setup_(self, _):
+            global _mac_status_item
+            sb = NSStatusBar.systemStatusBar()
+            _mac_status_item = sb.statusItemWithLength_(NSVariableStatusItemLength)
+
+            img = _create_tray_icon_image()
+            buf = _io.BytesIO()
+            img.save(buf, format="PNG")
+            ns_data = NSData.dataWithBytes_length_(buf.getvalue(), len(buf.getvalue()))
+            ns_img = NSImage.alloc().initWithData_(ns_data)
+            ns_img.setSize_((22, 22))
+            _mac_status_item.button().setImage_(ns_img)
+
+            menu = NSMenu.alloc().init()
+            show = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Show", "showWindow:", "")
+            show.setTarget_(self)
+            quit_ = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Quit", "quitApp:", "")
+            quit_.setTarget_(self)
+            menu.addItem_(show)
+            menu.addItem_(quit_)
+            _mac_status_item.setMenu_(menu)
+
+        def showWindow_(self, sender):
+            _show_window()
+
+        def quitApp_(self, sender):
+            _quit_app()
+
+    global _mac_tray_helper
+    _mac_tray_helper = _TrayDelegate.alloc().init()
+    _mac_tray_helper.performSelectorOnMainThread_withObject_waitUntilDone_(
+        "setup:", None, False
+    )
+
+
+# ── Windows tray via pystray (background thread) ───────────────────────────
+
+def _start_pystray():
+    """Create and run pystray icon (blocking — Windows/Linux only)."""
+    global _tray_icon
+    menu = pystray.Menu(
+        pystray.MenuItem("Show", _show_window, default=True),
+        pystray.MenuItem("Quit", _quit_app),
+    )
+    _tray_icon = pystray.Icon(APP_NAME, _create_tray_icon_image(), APP_NAME, menu)
+    _tray_icon.run()
+
+
+# ── Startup Registration (Mac + Windows) ────────────────────────────────────
+
+def _get_app_executable():
+    """Return the command to launch this app."""
+    if IS_FROZEN:
+        return sys.executable
+    return f"{sys.executable} {os.path.abspath(__file__)}"
+
+
+def _get_launch_agent_path():
+    """macOS LaunchAgent plist path."""
+    return os.path.expanduser("~/Library/LaunchAgents/com.churchroster.emaildispatcher.plist")
+
+
+def is_startup_enabled():
+    """Check if the app is set to launch on startup."""
+    if platform.system() == "Darwin":
+        return os.path.exists(_get_launch_agent_path())
+    elif platform.system() == "Windows":
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ)
+            try:
+                winreg.QueryValueEx(key, APP_NAME)
+                return True
+            except FileNotFoundError:
+                return False
+            finally:
+                winreg.CloseKey(key)
+        except Exception:
+            return False
+    return False
+
+
+def enable_startup():
+    """Register the app to launch on OS startup."""
+    if platform.system() == "Darwin":
+        exe = _get_app_executable()
+        plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.churchroster.emaildispatcher</string>
+    <key>ProgramArguments</key>
+    <array>
+        {"".join(f"<string>{part}</string>" for part in exe.split())}
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+</dict>
+</plist>"""
+        plist_path = _get_launch_agent_path()
+        os.makedirs(os.path.dirname(plist_path), exist_ok=True)
+        with open(plist_path, "w") as f:
+            f.write(plist_content)
+    elif platform.system() == "Windows":
+        try:
+            import winreg
+            exe = _get_app_executable()
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
+            winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, exe)
+            winreg.CloseKey(key)
+        except Exception as e:
+            print(f"[Startup] Failed to enable: {e}")
+
+
+def disable_startup():
+    """Remove the app from OS startup."""
+    if platform.system() == "Darwin":
+        plist_path = _get_launch_agent_path()
+        if os.path.exists(plist_path):
+            os.remove(plist_path)
+    elif platform.system() == "Windows":
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
+            try:
+                winreg.DeleteValue(key, APP_NAME)
+            except FileNotFoundError:
+                pass
+            winreg.CloseKey(key)
+        except Exception as e:
+            print(f"[Startup] Failed to disable: {e}")
+
+
 # ── App bootstrap ─────────────────────────────────────────────────────────────
+
+_api_instance = None
 
 if __name__ == "__main__":
     db_manager.init_db()
-    api = Api()
+    _api_instance = Api()
 
     # Start background scheduler for scheduled emails
-    scheduler_thread = threading.Thread(target=run_scheduler, args=(api,), daemon=True, name="EmailScheduler")
+    scheduler_thread = threading.Thread(target=run_scheduler, args=(_api_instance,), daemon=True, name="EmailScheduler")
     scheduler_thread.start()
 
-    window = webview.create_window(
-        "Church Roster & Email Dispatcher",
+    _webview_window = webview.create_window(
+        APP_NAME,
         html=HTML,
-        js_api=api,
+        js_api=_api_instance,
         width=1150,
         height=750,
         min_size=(1000, 650),
     )
-    webview.start()
+    _webview_window.events.closing += _on_window_closing
+
+    if platform.system() == "Darwin":
+        # macOS: both pywebview and the tray use the main thread's NSApplication loop.
+        # webview.start(func=...) runs our tray setup in a bg thread after the loop starts,
+        # which then dispatches NSStatusBarItem creation back to the main thread.
+        webview.start(func=_setup_mac_tray)
+    else:
+        # Windows/Linux: pystray in background thread, pywebview on main thread.
+        tray_thread = threading.Thread(target=_start_pystray, daemon=True, name="SystemTray")
+        tray_thread.start()
+        webview.start()

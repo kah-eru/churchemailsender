@@ -49,9 +49,12 @@ def insert(table, **kw):
 # ── Settings ─────────────────────────────────────────────────────────────────
 
 settings = {
-    "email": "gracecommunity.church@gmail.com",
-    "password": "abcd efgh ijkl mnop",
+    "sender_email": "gracecommunity.church@gmail.com",
+    "app_password": "abcd efgh ijkl mnop",
     "timezone": "US/Eastern",
+    "sender_name": "Grace Community Church",
+    "smtp_host": "smtp.gmail.com",
+    "smtp_port": "587",
 }
 for k, v in settings.items():
     insert("settings", key=k, value=v)
@@ -265,12 +268,33 @@ HISTORY = [
     ("Women's Retreat Registration", "Group: Bible Study - Thursday", 9, 9, 0, now - timedelta(days=50)),
 ]
 
-for subj, target, rcpt, sent, failed, ts in HISTORY:
-    insert("email_history", subject=subj, target_description=target,
-           recipient_count=rcpt, sent_count=sent, failed_count=failed,
-           sent_at=ts.strftime("%Y-%m-%d %H:%M:%S"))
+FAIL_REASONS = [
+    "Connection refused by remote host",
+    "Mailbox full — user over quota",
+    "Invalid recipient address",
+    "SMTP timeout after 30 seconds",
+    "550 User not found",
+]
 
-print(f"Created {len(HISTORY)} email history entries")
+contact_list = [(name, name.lower().replace(" ", ".") + "@email.com") for name in all_contacts.keys()]
+
+for subj, target, rcpt, sent, failed, ts in HISTORY:
+    hid = insert("email_history", subject=subj, target_description=target,
+                 recipient_count=rcpt, sent_count=sent, failed_count=failed,
+                 sent_at=ts.strftime("%Y-%m-%d %H:%M:%S"))
+    # Generate recipient details
+    sample = random.sample(contact_list, min(rcpt, len(contact_list)))
+    fail_indices = set(random.sample(range(len(sample)), min(failed, len(sample)))) if failed > 0 else set()
+    for i, (cname, cemail) in enumerate(sample):
+        if i in fail_indices:
+            insert("email_history_details", history_id=hid, recipient_name=cname,
+                   recipient_email=cemail, status="failed",
+                   error_message=random.choice(FAIL_REASONS))
+        else:
+            insert("email_history_details", history_id=hid, recipient_name=cname,
+                   recipient_email=cemail, status="sent", error_message=None)
+
+print(f"Created {len(HISTORY)} email history entries with recipient details")
 
 # ── Scheduled emails ─────────────────────────────────────────────────────────
 
