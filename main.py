@@ -31,7 +31,7 @@ import db_manager
 IS_FROZEN = getattr(sys, "frozen", False)
 APP_DIR = os.path.dirname(sys.executable if IS_FROZEN else os.path.abspath(__file__))
 APP_NAME = "Church Roster & Email Dispatcher"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 GITHUB_REPO = "kah-eru/churchemailsender"
 
 _EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
