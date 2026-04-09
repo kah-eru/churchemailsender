@@ -439,6 +439,183 @@ class TestSettingsTab:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# UPDATE CHECK
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestUpdateCheck:
+    def test_version_displayed_in_settings(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        switch_tab(page, "Settings")
+        version_el = page.locator("#current-version")
+        expect(version_el).to_contain_text("Current version: v")
+
+    def test_check_for_updates_button_exists(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        switch_tab(page, "Settings")
+        expect(page.locator("button:text('Check for Updates')")).to_be_visible()
+
+    def test_update_banner_hidden_by_default(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        switch_tab(page, "Settings")
+        expect(page.locator("#update-banner")).not_to_have_class(re.compile("show"))
+
+    def test_clicking_check_shows_banner(self, page, app_url):
+        """Clicking the button should show a result banner (regardless of network)."""
+        page.goto(app_url)
+        wait_for_app(page)
+        switch_tab(page, "Settings")
+        page.click("button:text('Check for Updates')")
+        page.wait_for_timeout(2000)
+        expect(page.locator("#update-banner")).to_have_class(re.compile("show"))
+
+    def test_update_section_exists(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        switch_tab(page, "Settings")
+        expect(page.locator("#update-section")).to_be_visible()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FIRST-TIME SETUP BANNER
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestSetupOverlay:
+    """Tests for the full-screen first-time setup overlay."""
+
+    def test_overlay_visible_when_no_credentials(self, fresh_setup_db, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        expect(page.locator("#setup-banner")).to_have_class(re.compile("show"))
+        expect(page.locator("#setup-banner")).to_contain_text("Welcome")
+        expect(page.locator("#setup-banner")).to_contain_text("email settings")
+
+    def test_overlay_hidden_after_credentials_saved(self, fresh_setup_db, page, app_url, ui_db):
+        ui_db.save_settings("me@x.com", "secret123")
+        page.goto(app_url)
+        wait_for_app(page)
+        expect(page.locator("#setup-banner")).not_to_have_class(re.compile("show"))
+
+    def test_go_to_settings_dismisses_overlay_and_navigates(self, fresh_setup_db, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        page.locator("#setup-banner button:text('Go to Settings')").click()
+        page.wait_for_timeout(300)
+        expect(page.locator("#setup-banner")).not_to_have_class(re.compile("show"))
+        expect(page.locator("#settings-tab")).to_be_visible()
+        active = page.locator("button.tab-btn.active")
+        expect(active).to_have_text("Settings")
+
+    def test_overlay_dismiss_persists_on_reload(self, fresh_setup_db, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        page.locator("#setup-banner button:text('Go to Settings')").click()
+        page.wait_for_timeout(300)
+        page.goto(app_url)
+        wait_for_app(page)
+        expect(page.locator("#setup-banner")).not_to_have_class(re.compile("show"))
+
+    def test_overlay_blocks_interaction(self, fresh_setup_db, page, app_url):
+        """The overlay should cover the full viewport."""
+        page.goto(app_url)
+        wait_for_app(page)
+        expect(page.locator("#setup-banner")).to_have_class(re.compile("show"))
+        box = page.locator("#setup-banner").bounding_box()
+        assert box["width"] >= 400
+        assert box["height"] >= 400
+
+    def test_overlay_hidden_when_dismissed_via_db(self, page, app_url):
+        """Default fixture dismisses banner — overlay should not show."""
+        page.goto(app_url)
+        wait_for_app(page)
+        expect(page.locator("#setup-banner")).not_to_have_class(re.compile("show"))
+
+    def test_reminder_not_visible_while_overlay_showing(self, fresh_setup_db, page, app_url):
+        """Side reminder should not show when overlay is up."""
+        page.goto(app_url)
+        wait_for_app(page)
+        expect(page.locator("#setup-banner")).to_have_class(re.compile("show"))
+        expect(page.locator("#setup-reminder")).not_to_have_class(re.compile("show"))
+
+    def test_dismissing_overlay_shows_reminder(self, fresh_setup_db, page, app_url):
+        """After dismissing overlay, side reminder should appear."""
+        page.goto(app_url)
+        wait_for_app(page)
+        page.locator("#setup-banner button:text('Go to Settings')").click()
+        page.wait_for_timeout(300)
+        expect(page.locator("#setup-banner")).not_to_have_class(re.compile("show"))
+        expect(page.locator("#setup-reminder")).to_have_class(re.compile("show"))
+
+
+class TestSetupReminder:
+    """Tests for the persistent side reminder notification."""
+
+    def test_reminder_visible_when_dismissed_but_not_configured(self, page, app_url):
+        """Default fixture: dismissed=true, no credentials -> reminder shows."""
+        page.goto(app_url)
+        wait_for_app(page)
+        expect(page.locator("#setup-reminder")).to_have_class(re.compile("show"))
+        expect(page.locator("#setup-reminder")).to_contain_text("Email Not Configured")
+
+    def test_reminder_hidden_when_credentials_configured(self, page, app_url, ui_db):
+        ui_db.save_settings("me@x.com", "secret123")
+        page.goto(app_url)
+        wait_for_app(page)
+        expect(page.locator("#setup-reminder")).not_to_have_class(re.compile("show"))
+
+    def test_reminder_close_button_hides(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        expect(page.locator("#setup-reminder")).to_have_class(re.compile("show"))
+        page.locator("#setup-reminder .reminder-close").click()
+        page.wait_for_timeout(300)
+        expect(page.locator("#setup-reminder")).not_to_have_class(re.compile("show"))
+
+    def test_reminder_configure_button_goes_to_settings(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        page.locator("#setup-reminder .reminder-btn").click()
+        page.wait_for_timeout(300)
+        expect(page.locator("#settings-tab")).to_be_visible()
+        active = page.locator("button.tab-btn.active")
+        expect(active).to_have_text("Settings")
+
+    def test_reminder_reappears_on_reload(self, page, app_url):
+        """Closing the reminder is session-only — it comes back on reload."""
+        page.goto(app_url)
+        wait_for_app(page)
+        page.locator("#setup-reminder .reminder-close").click()
+        page.wait_for_timeout(300)
+        expect(page.locator("#setup-reminder")).not_to_have_class(re.compile("show"))
+        page.goto(app_url)
+        wait_for_app(page)
+        expect(page.locator("#setup-reminder")).to_have_class(re.compile("show"))
+
+    def test_reminder_disappears_after_saving_credentials(self, page, app_url):
+        """Saving valid credentials should hide the reminder."""
+        page.goto(app_url)
+        wait_for_app(page)
+        expect(page.locator("#setup-reminder")).to_have_class(re.compile("show"))
+        # Navigate to settings and save credentials
+        switch_tab(page, "Settings")
+        page.fill("#s-email", "test@gmail.com")
+        page.fill("#s-password", "myapppass")
+        page.click("button:text('Save Settings')")
+        page.wait_for_timeout(500)
+        expect(page.locator("#setup-reminder")).not_to_have_class(re.compile("show"))
+
+    def test_both_hidden_when_fully_configured(self, fresh_setup_db, page, app_url, ui_db):
+        """With credentials saved, neither overlay nor reminder should show."""
+        ui_db.save_settings("me@x.com", "secret123")
+        page.goto(app_url)
+        wait_for_app(page)
+        expect(page.locator("#setup-banner")).not_to_have_class(re.compile("show"))
+        expect(page.locator("#setup-reminder")).not_to_have_class(re.compile("show"))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # THEME TOGGLE
 # ══════════════════════════════════════════════════════════════════════════════
 

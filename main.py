@@ -10,6 +10,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
+import urllib.error
 import uuid
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -29,6 +31,8 @@ import db_manager
 IS_FROZEN = getattr(sys, "frozen", False)
 APP_DIR = os.path.dirname(sys.executable if IS_FROZEN else os.path.abspath(__file__))
 APP_NAME = "Church Roster & Email Dispatcher"
+APP_VERSION = "1.0.0"
+GITHUB_REPO = "kah-eru/churchemailsender"
 
 _EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 
@@ -186,6 +190,24 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    def check_email_setup(self):
+        """Check whether email credentials have been configured."""
+        email = db_manager.get_setting("sender_email") or ""
+        password = db_manager.get_setting("app_password") or ""
+        dismissed = db_manager.get_setting("setup_banner_dismissed") or ""
+        return {
+            "configured": bool(email and password),
+            "dismissed": dismissed == "true"
+        }
+
+    def dismiss_setup_banner(self):
+        """Mark the first-time setup banner as dismissed."""
+        try:
+            db_manager.set_setting("setup_banner_dismissed", "true")
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     def test_email_connection(self, email, app_password, smtp_host="", smtp_port=""):
         try:
             host = smtp_host or db_manager.get_setting("smtp_host") or "smtp.gmail.com"
@@ -231,6 +253,40 @@ class Api:
             return {"ok": True, "enabled": is_startup_enabled()}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    # ── Update Check ──
+
+    def get_app_version(self):
+        return {"version": APP_VERSION}
+
+    def check_for_updates(self):
+        """Check GitHub Releases API for a newer version."""
+        try:
+            url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+            req = urllib.request.Request(url, headers={"Accept": "application/vnd.github.v3+json",
+                                                       "User-Agent": "ChurchRosterApp"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+            latest_tag = data.get("tag_name", "")
+            latest_version = latest_tag.lstrip("vV")
+            html_url = data.get("html_url", "")
+
+            if not latest_version:
+                return {"update_available": False, "current": APP_VERSION}
+
+            # Compare version tuples
+            def parse_ver(v):
+                try:
+                    return tuple(int(x) for x in v.split("."))
+                except (ValueError, AttributeError):
+                    return (0,)
+
+            if parse_ver(latest_version) > parse_ver(APP_VERSION):
+                return {"update_available": True, "current": APP_VERSION,
+                        "latest": latest_version, "url": html_url}
+            return {"update_available": False, "current": APP_VERSION, "latest": latest_version}
+        except Exception as e:
+            return {"update_available": False, "current": APP_VERSION, "error": str(e)}
 
     # ── File Picker ──
 
@@ -1207,6 +1263,89 @@ HTML = r"""<!DOCTYPE html>
   .toast.success { background: var(--success); }
   .toast.error { background: var(--danger); }
 
+  /* ── First-time Setup Overlay ── */
+  .setup-overlay {
+    display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.6); z-index: 10002; align-items: center; justify-content: center;
+  }
+  .setup-overlay.show { display: flex; }
+  .setup-overlay-box {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+    padding: 32px 36px; max-width: 440px; width: 90%; box-shadow: 0 12px 48px rgba(0,0,0,0.4);
+    text-align: center;
+  }
+  .setup-overlay-box .setup-icon {
+    font-size: 48px; margin-bottom: 16px;
+  }
+  .setup-overlay-box h2 {
+    margin: 0 0 8px; font-size: 20px; color: var(--text); font-weight: 700;
+  }
+  .setup-overlay-box p {
+    margin: 0 0 24px; font-size: 14px; color: var(--text-secondary); line-height: 1.5;
+  }
+  .setup-overlay-box .setup-btn {
+    background: var(--accent); border: none; color: #fff; padding: 10px 28px;
+    border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600;
+    transition: background 0.2s;
+  }
+  .setup-overlay-box .setup-btn:hover { background: var(--accent-hover, #1a6ddb); }
+
+  /* ── Side Setup Reminder ── */
+  .setup-reminder {
+    display: none; position: fixed; top: 50px; right: 20px; z-index: 9998;
+    background: var(--surface); border: 1px solid var(--accent); border-radius: 10px;
+    padding: 14px 16px; max-width: 280px; box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+    animation: slideInRight 0.3s ease-out;
+  }
+  .setup-reminder.show { display: block; }
+  @keyframes slideInRight {
+    from { transform: translateX(120%); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
+  }
+  .setup-reminder-header {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+  }
+  .setup-reminder-header .reminder-icon {
+    font-size: 18px; color: var(--accent);
+  }
+  .setup-reminder-header .reminder-title {
+    font-size: 13px; font-weight: 600; color: var(--text); flex: 1;
+  }
+  .setup-reminder-header .reminder-close {
+    background: none; border: none; color: var(--text-secondary); font-size: 16px;
+    cursor: pointer; padding: 0 2px; line-height: 1;
+  }
+  .setup-reminder-header .reminder-close:hover { color: var(--text); }
+  .setup-reminder p {
+    margin: 0 0 10px; font-size: 12px; color: var(--text-secondary); line-height: 1.4;
+  }
+  .setup-reminder .reminder-btn {
+    background: var(--accent); border: none; color: #fff; padding: 6px 14px;
+    border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600;
+    width: 100%;
+  }
+  .setup-reminder .reminder-btn:hover { background: var(--accent-hover, #1a6ddb); }
+
+  /* ── Update Banner ── */
+  .update-banner {
+    display: none; padding: 10px 14px; border-radius: 8px; font-size: 13px;
+    margin-top: 6px; line-height: 1.5;
+  }
+  .update-banner.show { display: block; }
+  .update-banner.has-update {
+    background: rgba(76, 175, 80, 0.1); border: 1px solid var(--success); color: var(--text);
+  }
+  .update-banner.up-to-date {
+    background: rgba(33, 150, 243, 0.1); border: 1px solid var(--accent); color: var(--text);
+  }
+  .update-banner.update-error {
+    background: rgba(244, 67, 54, 0.1); border: 1px solid var(--danger); color: var(--text);
+  }
+  .update-banner a {
+    color: var(--accent); font-weight: 600; text-decoration: none;
+  }
+  .update-banner a:hover { text-decoration: underline; }
+
   /* ── Template Save Modal ── */
   .modal-overlay {
     display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
@@ -1351,6 +1490,27 @@ HTML = r"""<!DOCTYPE html>
 <script src="https://cdn.jsdelivr.net/npm/quill@2.0.3/dist/quill.js"></script>
 </head>
 <body>
+<!-- First-time Setup Overlay -->
+<div id="setup-banner" class="setup-overlay">
+  <div class="setup-overlay-box">
+    <div class="setup-icon">&#9993;</div>
+    <h2>Welcome!</h2>
+    <p>Before you can send emails, you'll need to configure your email settings. Set up your SMTP credentials and send a test email to make sure everything works.</p>
+    <button class="setup-btn" onclick="dismissAndGoToSettings()">Go to Settings</button>
+  </div>
+</div>
+
+<!-- Side Setup Reminder -->
+<div id="setup-reminder" class="setup-reminder">
+  <div class="setup-reminder-header">
+    <span class="reminder-icon">&#9888;</span>
+    <span class="reminder-title">Email Not Configured</span>
+    <button class="reminder-close" onclick="hideSetupReminder()" title="Dismiss">&times;</button>
+  </div>
+  <p>You won't be able to send emails until you set up your SMTP credentials.</p>
+  <button class="reminder-btn" onclick="reminderGoToSettings()">Configure Email Settings</button>
+</div>
+
 <div class="app">
 
   <!-- ════ LEFT PANEL ════ -->
@@ -1562,6 +1722,15 @@ HTML = r"""<!DOCTYPE html>
           <button class="btn btn-danger" onclick="restoreDatabase()">Restore from Backup</button>
         </div>
         <div id="db-status" class="settings-status"></div>
+
+        <div class="section-title" style="margin-top:20px;">Updates</div>
+        <div id="update-section">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+            <span style="font-size:13px;color:var(--text-secondary);" id="current-version"></span>
+            <button class="btn btn-primary btn-nowrap" onclick="checkForUpdates()">Check for Updates</button>
+          </div>
+          <div id="update-banner" class="update-banner"></div>
+        </div>
       </div>
     </div>
   </div>
@@ -2718,7 +2887,49 @@ async function loadSettings() {
   }
   const startupToggle = document.getElementById('startup-toggle');
   if (startupToggle) startupToggle.checked = !!s.launch_on_startup;
+  // Show current version
+  const verRes = await pywebview.api.get_app_version();
+  const verEl = document.getElementById('current-version');
+  if (verEl && verRes) verEl.textContent = 'Current version: v' + verRes.version;
 }
+
+// ── First-time Setup Overlay & Side Reminder ──
+async function checkSetupBanner() {
+  const res = await pywebview.api.check_email_setup();
+  const overlay = document.getElementById('setup-banner');
+  const reminder = document.getElementById('setup-reminder');
+  if (!res.configured && !res.dismissed) {
+    overlay.classList.add('show');
+    reminder.classList.remove('show');
+  } else if (!res.configured && res.dismissed) {
+    overlay.classList.remove('show');
+    reminder.classList.add('show');
+  } else {
+    overlay.classList.remove('show');
+    reminder.classList.remove('show');
+  }
+}
+
+window.dismissAndGoToSettings = async function() {
+  await pywebview.api.dismiss_setup_banner();
+  document.getElementById('setup-banner').classList.remove('show');
+  document.getElementById('setup-reminder').classList.add('show');
+  switchTab('settings');
+};
+
+window.dismissSetupBanner = async function() {
+  await pywebview.api.dismiss_setup_banner();
+  document.getElementById('setup-banner').classList.remove('show');
+  document.getElementById('setup-reminder').classList.add('show');
+};
+
+window.hideSetupReminder = function() {
+  document.getElementById('setup-reminder').classList.remove('show');
+};
+
+window.reminderGoToSettings = function() {
+  switchTab('settings');
+};
 
 window.toggleStartup = async function(enabled) {
   const statusEl = document.getElementById('startup-status');
@@ -2734,6 +2945,25 @@ window.toggleStartup = async function(enabled) {
   setTimeout(() => { statusEl.textContent = ''; }, 3000);
 };
 
+window.checkForUpdates = async function() {
+  const banner = document.getElementById('update-banner');
+  banner.className = 'update-banner show up-to-date';
+  banner.textContent = 'Checking for updates...';
+
+  const res = await pywebview.api.check_for_updates();
+  if (res.error) {
+    banner.className = 'update-banner show update-error';
+    banner.textContent = 'Could not check for updates: ' + res.error;
+  } else if (res.update_available) {
+    banner.className = 'update-banner show has-update';
+    banner.innerHTML = '&#10024; A new version <strong>v' + res.latest + '</strong> is available! ' +
+      '<a href="' + res.url + '" target="_blank" rel="noopener">Download update</a>';
+  } else {
+    banner.className = 'update-banner show up-to-date';
+    banner.textContent = 'You\'re up to date! (v' + res.current + ')';
+  }
+};
+
 window.saveSettings = async function() {
   const email = document.getElementById('s-email').value.trim();
   const password = document.getElementById('s-password').value.trim();
@@ -2747,6 +2977,7 @@ window.saveSettings = async function() {
     showToast('Settings saved.', 'success');
     document.getElementById('s-password').value = '';
     loadSettings();
+    checkSetupBanner();
   } else {
     showToast(res.error, 'error');
   }
@@ -4095,6 +4326,7 @@ window.duplicateTemplate = async function() {
   await loadHistory();
   await loadTemplates();
   await loadSettings();
+  await checkSetupBanner();
   await refreshAcCache();
   updateFilterDropdowns();
 

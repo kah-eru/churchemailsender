@@ -2,6 +2,7 @@
 import json
 import os
 import tempfile
+import urllib.error
 import pytest
 from unittest.mock import patch, MagicMock
 from datetime import datetime, timedelta
@@ -273,6 +274,134 @@ class TestSettingsApi:
         api.set_ui_setting("theme", "dark")
         assert api.get_ui_setting("theme") == "dark"
         assert api.get_ui_setting("missing") == ""
+
+
+# ── Email Setup Check API ─────────────────────────────────────────────────
+
+class TestEmailSetupCheck:
+    def test_not_configured_by_default(self, api):
+        res = api.check_email_setup()
+        assert res["configured"] is False
+        assert res["dismissed"] is False
+
+    def test_configured_after_saving_credentials(self, api):
+        api.save_settings("me@x.com", "secret123")
+        res = api.check_email_setup()
+        assert res["configured"] is True
+        assert res["dismissed"] is False
+
+    def test_email_only_not_sufficient(self, api):
+        db_manager.set_setting("sender_email", "me@x.com")
+        res = api.check_email_setup()
+        assert res["configured"] is False
+
+    def test_password_only_not_sufficient(self, api):
+        db_manager.set_setting("app_password", "secret")
+        res = api.check_email_setup()
+        assert res["configured"] is False
+
+    def test_dismiss_banner(self, api):
+        res = api.dismiss_setup_banner()
+        assert res["ok"]
+        res = api.check_email_setup()
+        assert res["dismissed"] is True
+
+    def test_dismissed_persists_with_unconfigured(self, api):
+        api.dismiss_setup_banner()
+        res = api.check_email_setup()
+        assert res["configured"] is False
+        assert res["dismissed"] is True
+
+    def test_configured_and_dismissed(self, api):
+        api.save_settings("me@x.com", "secret123")
+        api.dismiss_setup_banner()
+        res = api.check_email_setup()
+        assert res["configured"] is True
+        assert res["dismissed"] is True
+
+
+# ── Update Check API ──────────────────────────────────────────────────────
+
+class TestGetAppVersion:
+    def test_returns_version(self, api):
+        res = api.get_app_version()
+        assert "version" in res
+        assert isinstance(res["version"], str)
+        assert len(res["version"]) > 0
+
+
+class TestCheckForUpdates:
+    def _mock_response(self, data, status=200):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(data).encode()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        return mock_resp
+
+    @patch("main.urllib.request.urlopen")
+    def test_update_available(self, mock_urlopen, api):
+        mock_urlopen.return_value = self._mock_response({
+            "tag_name": "v99.0.0",
+            "html_url": "https://github.com/kah-eru/churchemailsender/releases/tag/v99.0.0"
+        })
+        res = api.check_for_updates()
+        assert res["update_available"] is True
+        assert res["latest"] == "99.0.0"
+        assert "github.com" in res["url"]
+        assert res["current"] == main.APP_VERSION
+
+    @patch("main.urllib.request.urlopen")
+    def test_up_to_date(self, mock_urlopen, api):
+        mock_urlopen.return_value = self._mock_response({
+            "tag_name": f"v{main.APP_VERSION}",
+            "html_url": "https://github.com/kah-eru/churchemailsender/releases/tag/v1.0.0"
+        })
+        res = api.check_for_updates()
+        assert res["update_available"] is False
+        assert res["current"] == main.APP_VERSION
+
+    @patch("main.urllib.request.urlopen")
+    def test_older_version_on_remote(self, mock_urlopen, api):
+        mock_urlopen.return_value = self._mock_response({
+            "tag_name": "v0.0.1",
+            "html_url": "https://github.com/kah-eru/churchemailsender/releases/tag/v0.0.1"
+        })
+        res = api.check_for_updates()
+        assert res["update_available"] is False
+
+    @patch("main.urllib.request.urlopen")
+    def test_network_error(self, mock_urlopen, api):
+        mock_urlopen.side_effect = urllib.error.URLError("No internet")
+        res = api.check_for_updates()
+        assert res["update_available"] is False
+        assert "error" in res
+        assert res["current"] == main.APP_VERSION
+
+    @patch("main.urllib.request.urlopen")
+    def test_empty_tag_name(self, mock_urlopen, api):
+        mock_urlopen.return_value = self._mock_response({
+            "tag_name": "",
+            "html_url": ""
+        })
+        res = api.check_for_updates()
+        assert res["update_available"] is False
+
+    @patch("main.urllib.request.urlopen")
+    def test_tag_without_v_prefix(self, mock_urlopen, api):
+        mock_urlopen.return_value = self._mock_response({
+            "tag_name": "99.0.0",
+            "html_url": "https://github.com/kah-eru/churchemailsender/releases/tag/99.0.0"
+        })
+        res = api.check_for_updates()
+        assert res["update_available"] is True
+        assert res["latest"] == "99.0.0"
+
+    @patch("main.urllib.request.urlopen")
+    def test_timeout_error(self, mock_urlopen, api):
+        mock_urlopen.side_effect = TimeoutError("Connection timed out")
+        res = api.check_for_updates()
+        assert res["update_available"] is False
+        assert "error" in res
 
 
 # ── Resolve Recipients ─────────────────────────────────────────────────────

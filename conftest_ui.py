@@ -136,15 +136,27 @@ def _page_server(_api_bridge_server):
 
 
 @pytest.fixture(autouse=True)
-def ui_db(tmp_path, _api_bridge_server):
-    """Fresh temp database for every UI test."""
+def ui_db(request, tmp_path, _api_bridge_server):
+    """Fresh temp database for every UI test.
+    Dismisses the setup banner by default so the overlay doesn't block tests.
+    Tests in TestSetupBanner opt out via the fresh_setup_db marker/fixture.
+    """
     db_file = str(tmp_path / "ui_test.db")
     db_manager.DB_PATH = db_file
     db_manager.init_db()
+    # Dismiss setup banner by default unless test explicitly needs it
+    if "fresh_setup_db" not in request.fixturenames:
+        db_manager.set_setting("setup_banner_dismissed", "true")
     api = Api()
     _ApiBridgeHandler.api_instance = api
     _ApiBridgeHandler.db_path = db_file
     yield api
+
+
+@pytest.fixture()
+def fresh_setup_db():
+    """Marker fixture: when requested, ui_db will NOT dismiss the setup banner."""
+    pass
 
 
 @pytest.fixture()
