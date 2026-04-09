@@ -399,8 +399,10 @@ class TestSettingsTab:
         page.goto(app_url)
         wait_for_app(page)
         switch_tab(page, "Settings")
-        expect(page.locator("#s-smtp-host")).to_have_attribute("placeholder", re.compile("smtp.gmail.com"))
-        expect(page.locator("#s-smtp-port")).to_have_attribute("placeholder", re.compile("587"))
+        # Provider dropdown should default to Gmail
+        expect(page.locator("#s-provider")).to_have_value("gmail")
+        # Custom SMTP fields should be hidden when a preset is selected
+        expect(page.locator("#smtp-custom-fields")).not_to_be_visible()
 
     def test_save_settings(self, page, app_url):
         page.goto(app_url)
@@ -436,6 +438,177 @@ class TestSettingsTab:
         switch_tab(page, "Settings")
         page.wait_for_timeout(300)
         expect(page.locator("#s-email")).to_have_value("persist@gmail.com")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# EMAIL PROVIDER PRESETS
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestEmailProviderPresets:
+    def test_provider_dropdown_exists(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        switch_tab(page, "Settings")
+        expect(page.locator("#s-provider")).to_be_visible()
+
+    def test_provider_dropdown_has_options(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        switch_tab(page, "Settings")
+        options = page.locator("#s-provider option")
+        # placeholder + at least 6 providers
+        assert options.count() >= 7
+
+    def test_gmail_selected_by_default(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        switch_tab(page, "Settings")
+        expect(page.locator("#s-provider")).to_have_value("gmail")
+
+    def test_custom_fields_hidden_for_preset(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        switch_tab(page, "Settings")
+        page.select_option("#s-provider", "outlook")
+        page.wait_for_timeout(200)
+        expect(page.locator("#smtp-custom-fields")).not_to_be_visible()
+
+    def test_custom_fields_shown_for_custom(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        switch_tab(page, "Settings")
+        page.select_option("#s-provider", "custom")
+        page.wait_for_timeout(200)
+        expect(page.locator("#smtp-custom-fields")).to_be_visible()
+        expect(page.locator("#s-smtp-host")).to_be_visible()
+        expect(page.locator("#s-smtp-port")).to_be_visible()
+
+    def test_save_with_preset_provider(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        switch_tab(page, "Settings")
+        page.select_option("#s-provider", "yahoo")
+        page.fill("#s-email", "test@yahoo.com")
+        page.fill("#s-password", "yahoopass")
+        page.click("button:text('Save Settings')")
+        page.wait_for_timeout(500)
+        toast = get_toast_text(page)
+        assert "saved" in toast.lower()
+        # Reload and verify provider persists
+        switch_tab(page, "Contacts")
+        switch_tab(page, "Settings")
+        page.wait_for_timeout(500)
+        expect(page.locator("#s-provider")).to_have_value("yahoo")
+
+    def test_save_with_custom_provider(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        switch_tab(page, "Settings")
+        page.select_option("#s-provider", "custom")
+        page.wait_for_timeout(200)
+        page.fill("#s-email", "me@example.com")
+        page.fill("#s-password", "mypass")
+        page.fill("#s-smtp-host", "mail.example.com")
+        page.fill("#s-smtp-port", "465")
+        page.click("button:text('Save Settings')")
+        page.wait_for_timeout(500)
+        toast = get_toast_text(page)
+        assert "saved" in toast.lower()
+        # Reload and verify custom host persists
+        switch_tab(page, "Contacts")
+        switch_tab(page, "Settings")
+        page.wait_for_timeout(500)
+        expect(page.locator("#s-provider")).to_have_value("custom")
+        expect(page.locator("#s-smtp-host")).to_have_value("mail.example.com")
+        expect(page.locator("#s-smtp-port")).to_have_value("465")
+
+    def test_custom_requires_host(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        switch_tab(page, "Settings")
+        page.select_option("#s-provider", "custom")
+        page.wait_for_timeout(200)
+        page.fill("#s-email", "me@example.com")
+        page.fill("#s-password", "mypass")
+        # Leave host empty
+        page.fill("#s-smtp-host", "")
+        page.click("button:text('Save Settings')")
+        page.wait_for_timeout(500)
+        toast = get_toast_text(page)
+        assert "smtp" in toast.lower() or "host" in toast.lower()
+
+    def test_switching_provider_updates_help(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        switch_tab(page, "Settings")
+        # Open help panel
+        page.click("button:text('? Help')")
+        page.wait_for_timeout(200)
+        expect(page.locator("#email-help-panel")).to_be_visible()
+        # Select Outlook
+        page.select_option("#s-provider", "outlook")
+        page.wait_for_timeout(200)
+        info = page.locator("#email-help-provider-info")
+        expect(info).to_be_visible()
+        assert "outlook" in info.text_content().lower()
+
+
+class TestEmailHelp:
+    def test_help_button_exists(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        switch_tab(page, "Settings")
+        expect(page.locator("button:text('? Help')")).to_be_visible()
+
+    def test_help_panel_hidden_by_default(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        switch_tab(page, "Settings")
+        expect(page.locator("#email-help-panel")).not_to_be_visible()
+
+    def test_help_panel_toggles(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        switch_tab(page, "Settings")
+        page.click("button:text('? Help')")
+        page.wait_for_timeout(200)
+        expect(page.locator("#email-help-panel")).to_be_visible()
+        # Click again to close
+        page.click("button:text('? Help')")
+        page.wait_for_timeout(200)
+        expect(page.locator("#email-help-panel")).not_to_be_visible()
+
+    def test_help_panel_has_steps(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        switch_tab(page, "Settings")
+        page.click("button:text('? Help')")
+        page.wait_for_timeout(200)
+        steps = page.locator("#email-help-steps li")
+        assert steps.count() >= 3
+
+    def test_help_panel_shows_provider_info(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        switch_tab(page, "Settings")
+        page.click("button:text('? Help')")
+        page.wait_for_timeout(200)
+        # Gmail should be shown by default
+        info = page.locator("#email-help-provider-info")
+        expect(info).to_be_visible()
+        assert "gmail" in info.text_content().lower() or "app password" in info.text_content().lower()
+
+    def test_help_close_button(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        switch_tab(page, "Settings")
+        page.click("button:text('? Help')")
+        page.wait_for_timeout(200)
+        expect(page.locator("#email-help-panel")).to_be_visible()
+        # Click the X button inside the help panel
+        page.locator("#email-help-panel button:text('\u00d7')").click()
+        page.wait_for_timeout(200)
+        expect(page.locator("#email-help-panel")).not_to_be_visible()
 
 
 # ══════════════════════════════════════════════════════════════════════════════

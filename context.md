@@ -1,7 +1,7 @@
 # Church Roster & Email Dispatcher — Context
 
 ## Overview
-A standalone Python desktop app (v1.1.0) for managing a church contact roster and sending batch emails with rich text formatting. Built with pywebview for a native desktop window with an embedded web view. Compiles to macOS `.app` (DMG) and Windows `.exe` via PyInstaller. Supports light and dark themes, system tray integration, and automatic update checking via GitHub Releases.
+A standalone Python desktop app (v1.2.0) for managing a church contact roster and sending batch emails with rich text formatting. Built with pywebview for a native desktop window with an embedded web view. Compiles to macOS `.app` (DMG) and Windows `.exe` via PyInstaller. Supports light and dark themes, system tray integration, and automatic update checking via GitHub Releases.
 
 **Repository:** https://github.com/kah-eru/churchemailsender
 
@@ -13,10 +13,10 @@ Strict **two-file** architecture (plus test/support files):
 | `main.py` | ~4,580 | Presentation & logic — pywebview window, full inline HTML/CSS/JS frontend, Python `Api` class, email dispatch, background scheduler, system tray, update checker |
 | `db_manager.py` | ~905 | Data layer — SQLite CRUD for contacts, families, groups, settings, templates, schedules, history, recurrence engine |
 | `seed.py` | ~387 | Dev utility — populates DB with realistic fake data (12 families, 15 singles, 6 groups, 8 templates, 20 history entries, 5 scheduled emails) |
-| `test_api.py` | ~1,260 | 136 unit tests for all Api class methods (mocked SMTP, mocked HTTP for update checks) |
+| `test_api.py` | ~1,330 | 146 unit tests for all Api class methods (mocked SMTP, mocked HTTP for update checks, email presets) |
 | `test_db_manager.py` | ~851 | 102 unit tests for all db_manager functions |
 | `test_scheduler.py` | ~556 | 25 unit tests for background scheduler and recurrence |
-| `test_ui.py` | ~1,050 | 96 Playwright end-to-end UI tests covering every tab, modal, and interaction |
+| `test_ui.py` | ~1,180 | 111 Playwright end-to-end UI tests covering every tab, modal, interaction, email provider presets, and help panel |
 | `conftest_ui.py` | ~165 | Shared fixtures for Playwright tests — HTTP bridge between browser JS and Python Api class |
 | `context.md` | — | This file |
 | `requirements.txt` | — | Runtime dependencies: `pywebview>=4.0`, `pystray>=0.19`, `Pillow>=9.0` |
@@ -42,10 +42,10 @@ Strict **two-file** architecture (plus test/support files):
 - **Recurrence engine:** `compute_next_occurrence()` handles daily, every-other-day, weekly (multi-day), every-other-week, and monthly patterns. JS day convention (0=Sun..6=Sat) converted to Python (0=Mon..6=Sun) via `(d - 1) % 7`. Monthly clamps `day_of_month` to valid range using `calendar.monthrange`.
 
 ### main.py
-- **Constants:** `APP_VERSION = "1.1.0"`, `GITHUB_REPO = "kah-eru/churchemailsender"`, `APP_NAME`, `IS_FROZEN`, `APP_DIR`
+- **Constants:** `APP_VERSION = "1.2.0"`, `GITHUB_REPO = "kah-eru/churchemailsender"`, `APP_NAME`, `IS_FROZEN`, `APP_DIR`
 - **Python backend (`class Api`)** — ~40+ methods exposed to JavaScript via pywebview's `js_api` bridge:
   - Contact/family CRUD: `get_contacts`, `add_contact`, `update_contact`, `delete_contacts`, `set_contact_opt_out`, `bulk_update_category`, `bulk_add_to_group`, `get_families`, `add_family`, `rename_family`, `delete_family`, `add_family_member`, `remove_family_member`
-  - Settings: `get_settings`, `save_settings`, `save_timezone`, `test_email_connection`, `send_test_email`, `set_launch_on_startup`, `get_ui_setting`, `set_ui_setting`
+  - Settings: `get_settings`, `save_settings`, `save_timezone`, `test_email_connection`, `send_test_email`, `set_launch_on_startup`, `get_ui_setting`, `set_ui_setting`, `get_email_presets`
   - First-time setup: `check_email_setup` (returns `{configured, dismissed}`), `dismiss_setup_banner`
   - Update check: `get_app_version`, `check_for_updates` (queries GitHub Releases API, compares version tuples)
   - Groups: `get_groups`, `add_group`, `rename_group`, `delete_group`, `add_group_member`, `remove_group_member`, `add_family_to_group`
@@ -71,6 +71,7 @@ Strict **two-file** architecture (plus test/support files):
   - Right panel: email composer with template selector, autocomplete recipient search, Quill rich text editor, file attachments, recurrence controls, scheduling
   - First-time setup overlay (full-screen modal blocking app until dismissed)
   - Side reminder notification (top-right, persistent until credentials configured)
+  - Email provider presets dropdown with auto-fill, "? Help" button with provider-specific instructions
   - Update checker section in Settings tab
   - Theme toggle button (top-right)
 - **Bootstrap** — `webview.create_window(html=HTML, js_api=api)` renders the app in a native window; scheduler thread starts before window
@@ -82,7 +83,7 @@ Strict **two-file** architecture (plus test/support files):
 | GUI | pywebview (native window with embedded web view, WKWebView on macOS, EdgeChromium on Windows) |
 | Rich Text Editor | Quill 2.x (Snow theme) — loaded from jsDelivr CDN |
 | Database | sqlite3 (local `contacts.db` file) |
-| Email | smtplib + email.mime (Gmail SMTP, TLS on port 587 by default, configurable) |
+| Email | smtplib + email.mime (SMTP with TLS, port 587 by default; presets for Gmail, Outlook, Yahoo, iCloud, Zoho, or custom domain) |
 | Styling | CSS custom properties, neutral gray palette with teal accent, light/dark mode |
 | Timezone | `zoneinfo.ZoneInfo` (Python 3.9+ stdlib) for timezone-aware scheduling |
 | Update Check | `urllib.request` against GitHub Releases API (`api.github.com`) |
@@ -107,9 +108,27 @@ Credentials are configured via the **Settings tab** in the app UI. They are stor
 
 On first launch, a **full-screen setup overlay** blocks the app and prompts the user to configure email settings. After dismissing the overlay, a **persistent side reminder** notification appears in the top-right corner until credentials are saved.
 
+### Email Provider Presets
+A **provider dropdown** in Settings lets users select from built-in presets that auto-fill SMTP host and port:
+
+| Provider | SMTP Host | Port |
+|----------|-----------|------|
+| Gmail | `smtp.gmail.com` | `587` |
+| Outlook / Hotmail | `smtp-mail.outlook.com` | `587` |
+| Yahoo Mail | `smtp.mail.yahoo.com` | `587` |
+| iCloud Mail | `smtp.mail.me.com` | `587` |
+| Zoho Mail | `smtp.zoho.com` | `587` |
+| Custom / Own Domain | *(user-provided)* | *(user-provided)* |
+
+When a preset provider is selected, the SMTP host/port fields are hidden (auto-filled from the preset). Selecting "Custom / Own Domain" reveals manual host/port input fields. The dropdown auto-detects the current provider on load by matching the saved `smtp_host` against known presets.
+
+A **"? Help" button** next to the section title toggles an instructional panel with step-by-step setup instructions and provider-specific guidance (e.g., how to generate an App Password for Gmail, where to find SMTP settings for custom domains). The help text updates dynamically as the user switches providers.
+
+API method: `get_email_presets()` — returns a list of `{id, name, host, port, help}` objects.
+
 Settings stored in DB:
-- `sender_email` — Gmail address (or other SMTP provider)
-- `app_password` — App Password (for Gmail: generated at Google Account > Security > App Passwords)
+- `sender_email` — Email address (any SMTP provider)
+- `app_password` — App Password (provider-specific; for Gmail: generated at Google Account > Security > App Passwords)
 - `sender_name` — Display name for outgoing emails
 - `smtp_host` — SMTP server hostname (default: `smtp.gmail.com`)
 - `smtp_port` — SMTP port (default: `587`)
@@ -209,11 +228,15 @@ git tag -a vX.Y.Z -m "vX.Y.Z — description" && git push origin vX.Y.Z
 - No auto-download — users click the link to download the new DMG/exe from GitHub
 
 ### 3. GUI Settings for Email Credentials
-- Settings tab with email, app password, sender name, SMTP host/port inputs
+- Settings tab with email provider dropdown (presets for Gmail, Outlook, Yahoo, iCloud, Zoho, custom domain)
+- Selecting a preset auto-fills SMTP host/port; "Custom / Own Domain" reveals manual host/port inputs
+- **"? Help" button** toggles an instructional panel with provider-specific setup guidance (app passwords, SMTP details)
+- Help panel content updates dynamically when the selected provider changes
 - "Test Connection" button verifies SMTP login before saving
 - "Send Test Email" button sends a test message to the configured sender address
 - Credentials stored in `settings` table (no hardcoded constants)
 - Friendly SMTP error messages for common failures (auth, connection refused, timeout, SSL, relay denied, DNS)
+- Validation: custom provider requires an SMTP host before saving
 
 ### 4. Email Attachments + Inline Images
 - "Attach Files" button opens native file picker via `webview.FileDialog.OPEN` (multiple files)
@@ -295,14 +318,14 @@ git tag -a vX.Y.Z -m "vX.Y.Z — description" && git push origin vX.Y.Z
 
 ## Testing
 
-**359 tests** across 4 test files, all passing:
+**384 tests** across 4 test files, all passing:
 
 | File | Tests | What it covers |
 |------|-------|----------------|
-| `test_api.py` | 136 | All Api class methods — contacts, families, groups, settings, email setup check, update checker, dispatch, scheduling, templates, history, CSV, file picker, backup/restore |
+| `test_api.py` | 146 | All Api class methods — contacts, families, groups, settings, email presets, email setup check, update checker, dispatch, scheduling, templates, history, CSV, file picker, backup/restore |
 | `test_db_manager.py` | 102 | All db_manager functions — init, settings, families, contacts, groups, family members, scheduled emails, templates, email history, analytics, backup/restore, recurrence |
 | `test_scheduler.py` | 25 | Background scheduler — due email processing, recurrence, opt-out filtering, failures, timezone, history logging, attachments |
-| `test_ui.py` | 96 | Playwright end-to-end — tab navigation, contacts CRUD, families, groups, settings, setup overlay, setup reminder, update check, theme toggle, composer, scheduled tab, history, analytics, layout, modals, autocomplete, toasts, bulk operations, edge cases |
+| `test_ui.py` | 111 | Playwright end-to-end — tab navigation, contacts CRUD, families, groups, settings, email provider presets, email help panel, setup overlay, setup reminder, update check, theme toggle, composer, scheduled tab, history, analytics, layout, modals, autocomplete, toasts, bulk operations, edge cases |
 
 ### Running tests
 ```bash
@@ -342,3 +365,4 @@ All backend operations complete in < 2ms with 500 contacts. The app uses ~5MB Py
 |---------|-----|---------|
 | 1.0.0 | `v1.0.0` | Initial release — contacts, families, groups, email dispatch, scheduling, templates, history, analytics, CSV, themes, tray |
 | 1.1.0 | `v1.1.0` | First-time email setup overlay + side reminder, update checker in Settings tab, 30 new tests |
+| 1.2.0 | `v1.2.0` | Email provider presets (Gmail, Outlook, Yahoo, iCloud, Zoho, Custom), help panel with provider-specific instructions, 25 new tests |

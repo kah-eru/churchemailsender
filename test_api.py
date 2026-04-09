@@ -276,6 +276,77 @@ class TestSettingsApi:
         assert api.get_ui_setting("missing") == ""
 
 
+# ── Email Presets API ─────────────────────────────────────────────────────
+
+class TestEmailPresets:
+    def test_returns_list(self, api):
+        presets = api.get_email_presets()
+        assert isinstance(presets, list)
+        assert len(presets) >= 5  # at least gmail, outlook, yahoo, icloud, zoho, custom
+
+    def test_each_preset_has_required_fields(self, api):
+        presets = api.get_email_presets()
+        for p in presets:
+            assert "id" in p
+            assert "name" in p
+            assert "host" in p
+            assert "port" in p
+            assert "help" in p
+            assert isinstance(p["help"], str)
+            assert len(p["help"]) > 0
+
+    def test_gmail_preset(self, api):
+        presets = api.get_email_presets()
+        gmail = next(p for p in presets if p["id"] == "gmail")
+        assert gmail["host"] == "smtp.gmail.com"
+        assert gmail["port"] == "587"
+        assert "App Password" in gmail["help"]
+
+    def test_outlook_preset(self, api):
+        presets = api.get_email_presets()
+        outlook = next(p for p in presets if p["id"] == "outlook")
+        assert outlook["host"] == "smtp-mail.outlook.com"
+        assert outlook["port"] == "587"
+
+    def test_yahoo_preset(self, api):
+        presets = api.get_email_presets()
+        yahoo = next(p for p in presets if p["id"] == "yahoo")
+        assert yahoo["host"] == "smtp.mail.yahoo.com"
+        assert yahoo["port"] == "587"
+
+    def test_icloud_preset(self, api):
+        presets = api.get_email_presets()
+        icloud = next(p for p in presets if p["id"] == "icloud")
+        assert icloud["host"] == "smtp.mail.me.com"
+        assert icloud["port"] == "587"
+
+    def test_custom_preset_has_empty_host(self, api):
+        presets = api.get_email_presets()
+        custom = next(p for p in presets if p["id"] == "custom")
+        assert custom["host"] == ""
+        assert custom["port"] == ""
+        assert "SMTP server" in custom["help"]
+
+    def test_preset_ids_are_unique(self, api):
+        presets = api.get_email_presets()
+        ids = [p["id"] for p in presets]
+        assert len(ids) == len(set(ids))
+
+    def test_save_with_preset_host(self, api):
+        """Saving with a preset host should persist correctly."""
+        api.save_settings("me@outlook.com", "pass", smtp_host="smtp-mail.outlook.com", smtp_port="587")
+        s = api.get_settings()
+        assert s["smtp_host"] == "smtp-mail.outlook.com"
+        assert s["smtp_port"] == "587"
+
+    def test_save_with_custom_host(self, api):
+        """Saving with a custom host should persist correctly."""
+        api.save_settings("me@example.com", "pass", smtp_host="mail.example.com", smtp_port="465")
+        s = api.get_settings()
+        assert s["smtp_host"] == "mail.example.com"
+        assert s["smtp_port"] == "465"
+
+
 # ── Email Setup Check API ─────────────────────────────────────────────────
 
 class TestEmailSetupCheck:

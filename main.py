@@ -31,7 +31,7 @@ import db_manager
 IS_FROZEN = getattr(sys, "frozen", False)
 APP_DIR = os.path.dirname(sys.executable if IS_FROZEN else os.path.abspath(__file__))
 APP_NAME = "Church Roster & Email Dispatcher"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 GITHUB_REPO = "kah-eru/churchemailsender"
 
 _EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
@@ -162,6 +162,23 @@ class Api:
                 "timezone": timezone, "sender_name": sender_name,
                 "smtp_host": smtp_host, "smtp_port": smtp_port,
                 "launch_on_startup": is_startup_enabled()}
+
+    def get_email_presets(self):
+        """Return known email provider SMTP presets."""
+        return [
+            {"id": "gmail", "name": "Gmail", "host": "smtp.gmail.com", "port": "587",
+             "help": "Use an App Password, not your regular Google password. Go to myaccount.google.com > Security > 2-Step Verification > App Passwords to generate one."},
+            {"id": "outlook", "name": "Outlook / Hotmail", "host": "smtp-mail.outlook.com", "port": "587",
+             "help": "Use your Outlook/Hotmail email and password. If you have 2FA enabled, generate an app password at account.live.com/proofs/manage."},
+            {"id": "yahoo", "name": "Yahoo Mail", "host": "smtp.mail.yahoo.com", "port": "587",
+             "help": "You need to generate an App Password. Go to login.yahoo.com > Account Security > Generate app password."},
+            {"id": "icloud", "name": "iCloud Mail", "host": "smtp.mail.me.com", "port": "587",
+             "help": "Use an app-specific password. Go to appleid.apple.com > Sign-In and Security > App-Specific Passwords to generate one."},
+            {"id": "zoho", "name": "Zoho Mail", "host": "smtp.zoho.com", "port": "587",
+             "help": "Use your Zoho email and password. If 2FA is enabled, generate an application-specific password in Zoho account settings."},
+            {"id": "custom", "name": "Custom / Own Domain", "host": "", "port": "",
+             "help": "Enter the SMTP server hostname and port provided by your email hosting provider. Common ports: 587 (TLS/STARTTLS), 465 (SSL), 25 (unencrypted, not recommended). Your hosting provider's support docs will have these details."},
+        ]
 
     def save_settings(self, email, app_password, sender_name="", smtp_host="", smtp_port=""):
         try:
@@ -1094,6 +1111,30 @@ HTML = r"""<!DOCTYPE html>
   .section-label { font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
   .section-title { font-size: 14px; font-weight: 600; margin-bottom: 12px; }
   .settings-status { margin-top: 12px; font-size: 12px; color: var(--text-muted); }
+
+  /* ── Email Help Panel ── */
+  .btn-help {
+    font-size: 11px; padding: 2px 8px; border-radius: 4px; cursor: pointer;
+    background: var(--accent); color: #fff; border: none; font-weight: 600;
+  }
+  .btn-help:hover { opacity: 0.85; }
+  .email-help-panel {
+    display: none; margin-bottom: 12px; padding: 12px; border-radius: 8px;
+    background: var(--card-bg, var(--surface)); border: 1px solid var(--border);
+    font-size: 13px; line-height: 1.5;
+  }
+  .email-help-panel.show { display: block; }
+  .email-help-header {
+    display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;
+  }
+  .email-help-content ol { margin: 0 0 8px 18px; padding: 0; }
+  .email-help-content li { margin-bottom: 4px; }
+  .email-help-provider-info {
+    padding: 8px 10px; border-radius: 6px; background: var(--hover); font-size: 12px;
+    display: none; margin-top: 8px;
+  }
+  .email-help-provider-info.show { display: block; }
+
   .composer-select {
     flex: 1; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px;
     background: var(--surface); color: var(--text); font-size: 12px; cursor: pointer;
@@ -1655,7 +1696,27 @@ HTML = r"""<!DOCTYPE html>
     <!-- Settings Tab -->
     <div id="settings-tab" class="tab-content">
       <div style="padding: 10px 0; overflow-y:auto; flex:1;">
-        <div class="section-title">SMTP Credentials</div>
+        <div class="section-title" style="display:flex;align-items:center;gap:8px;">Email Configuration <button class="btn btn-sm btn-help" onclick="toggleEmailHelp()" title="How to set up email">? Help</button></div>
+        <div id="email-help-panel" class="email-help-panel">
+          <div class="email-help-content">
+            <div class="email-help-header">
+              <strong>How to configure email sending</strong>
+              <button class="btn btn-sm" onclick="toggleEmailHelp()" style="padding:2px 8px;">&times;</button>
+            </div>
+            <ol id="email-help-steps">
+              <li>Select your email provider from the dropdown below.</li>
+              <li>Enter your email address and app password.</li>
+              <li>Click <strong>Test Connection</strong> to verify your settings.</li>
+              <li>Click <strong>Save Settings</strong> to store them.</li>
+            </ol>
+            <div id="email-help-provider-info" class="email-help-provider-info"></div>
+          </div>
+        </div>
+        <div class="form-row">
+          <select id="s-provider" onchange="onProviderChange()">
+            <option value="">Select email provider...</option>
+          </select>
+        </div>
         <div class="form-row">
           <input type="text" id="s-sender-name" placeholder="Sender display name (e.g. Grace Community Church)">
         </div>
@@ -1665,9 +1726,9 @@ HTML = r"""<!DOCTYPE html>
         <div class="form-row">
           <input type="password" id="s-password" placeholder="App Password (leave blank to keep current)">
         </div>
-        <div class="form-row">
-          <input type="text" id="s-smtp-host" placeholder="SMTP Host (default: smtp.gmail.com)">
-          <input type="text" id="s-smtp-port" placeholder="Port (default: 587)" style="max-width:100px;">
+        <div class="form-row" id="smtp-custom-fields" style="display:none;">
+          <input type="text" id="s-smtp-host" placeholder="SMTP Host (e.g. mail.yourdomain.com)">
+          <input type="text" id="s-smtp-port" placeholder="Port (e.g. 587)" style="max-width:100px;">
         </div>
         <div class="btn-row" style="margin-top: 6px;">
           <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
@@ -2863,21 +2924,48 @@ function getRecipientSelection() {
 // SETTINGS
 // ══════════════════════════════════════════════════════════════════════════════
 
+var emailPresets = [];
+
 async function loadSettings() {
   await waitForApi();
+  // Load presets and populate dropdown
+  emailPresets = await pywebview.api.get_email_presets();
+  const providerSel = document.getElementById('s-provider');
+  // Clear existing options except the first placeholder
+  while (providerSel.options.length > 1) providerSel.remove(1);
+  for (const p of emailPresets) {
+    const opt = document.createElement('option');
+    opt.value = p.id;
+    opt.textContent = p.name;
+    providerSel.appendChild(opt);
+  }
+
   const s = await pywebview.api.get_settings();
   document.getElementById('s-email').value = s.email;
   document.getElementById('s-sender-name').value = s.sender_name || '';
-  document.getElementById('s-smtp-host').value = (s.smtp_host && s.smtp_host !== 'smtp.gmail.com') ? s.smtp_host : '';
-  document.getElementById('s-smtp-port').value = (s.smtp_port && s.smtp_port !== '587') ? s.smtp_port : '';
   document.getElementById('s-password').placeholder =
     s.has_password ? 'App Password (saved — leave blank to keep)' : 'App Password';
+
+  // Detect which provider matches the current SMTP host
+  const currentHost = s.smtp_host || 'smtp.gmail.com';
+  const matched = emailPresets.find(p => p.host && p.host === currentHost);
+  if (matched) {
+    providerSel.value = matched.id;
+    document.getElementById('smtp-custom-fields').style.display = 'none';
+    document.getElementById('s-smtp-host').value = '';
+    document.getElementById('s-smtp-port').value = '';
+  } else {
+    providerSel.value = 'custom';
+    document.getElementById('smtp-custom-fields').style.display = 'flex';
+    document.getElementById('s-smtp-host').value = currentHost;
+    document.getElementById('s-smtp-port').value = s.smtp_port || '587';
+  }
+  updateProviderHelp();
+
   const tzSel = document.getElementById('s-timezone');
   if (s.timezone) {
     tzSel.value = s.timezone;
-    // If the value doesn't match any option, it stays at the first
     if (tzSel.value !== s.timezone) {
-      // Add it as a custom option
       const opt = document.createElement('option');
       opt.value = s.timezone;
       opt.textContent = s.timezone;
@@ -2887,10 +2975,53 @@ async function loadSettings() {
   }
   const startupToggle = document.getElementById('startup-toggle');
   if (startupToggle) startupToggle.checked = !!s.launch_on_startup;
-  // Show current version
   const verRes = await pywebview.api.get_app_version();
   const verEl = document.getElementById('current-version');
   if (verEl && verRes) verEl.textContent = 'Current version: v' + verRes.version;
+}
+
+window.onProviderChange = function() {
+  const sel = document.getElementById('s-provider');
+  const preset = emailPresets.find(p => p.id === sel.value);
+  const customFields = document.getElementById('smtp-custom-fields');
+  if (!preset || preset.id === 'custom') {
+    customFields.style.display = 'flex';
+    document.getElementById('s-smtp-host').value = '';
+    document.getElementById('s-smtp-port').value = '';
+  } else {
+    customFields.style.display = 'none';
+    document.getElementById('s-smtp-host').value = '';
+    document.getElementById('s-smtp-port').value = '';
+  }
+  updateProviderHelp();
+};
+
+function getSmtpHostPort() {
+  const sel = document.getElementById('s-provider');
+  const preset = emailPresets.find(p => p.id === sel.value);
+  if (preset && preset.id !== 'custom' && preset.host) {
+    return { host: preset.host, port: preset.port };
+  }
+  return {
+    host: document.getElementById('s-smtp-host').value.trim(),
+    port: document.getElementById('s-smtp-port').value.trim()
+  };
+}
+
+window.toggleEmailHelp = function() {
+  document.getElementById('email-help-panel').classList.toggle('show');
+};
+
+function updateProviderHelp() {
+  const sel = document.getElementById('s-provider');
+  const infoEl = document.getElementById('email-help-provider-info');
+  const preset = emailPresets.find(p => p.id === sel.value);
+  if (preset && preset.help) {
+    infoEl.innerHTML = '<strong>' + esc(preset.name) + ':</strong> ' + esc(preset.help);
+    infoEl.classList.add('show');
+  } else {
+    infoEl.classList.remove('show');
+  }
 }
 
 // ── First-time Setup Overlay & Side Reminder ──
@@ -2968,11 +3099,12 @@ window.saveSettings = async function() {
   const email = document.getElementById('s-email').value.trim();
   const password = document.getElementById('s-password').value.trim();
   const senderName = document.getElementById('s-sender-name').value.trim();
-  const smtpHost = document.getElementById('s-smtp-host').value.trim();
-  const smtpPort = document.getElementById('s-smtp-port').value.trim();
+  const smtp = getSmtpHostPort();
   if (!email) { showToast('Enter an email address.', 'error'); return; }
+  const provider = document.getElementById('s-provider').value;
+  if (provider === 'custom' && !smtp.host) { showToast('Enter an SMTP host for custom provider.', 'error'); return; }
 
-  const res = await pywebview.api.save_settings(email, password, senderName, smtpHost, smtpPort);
+  const res = await pywebview.api.save_settings(email, password, senderName, smtp.host, smtp.port);
   if (res.ok) {
     showToast('Settings saved.', 'success');
     document.getElementById('s-password').value = '';
@@ -2986,14 +3118,13 @@ window.saveSettings = async function() {
 window.testConnection = async function() {
   const email = document.getElementById('s-email').value.trim();
   const password = document.getElementById('s-password').value.trim();
-  const smtpHost = document.getElementById('s-smtp-host').value.trim();
-  const smtpPort = document.getElementById('s-smtp-port').value.trim();
+  const smtp = getSmtpHostPort();
   if (!email || !password) {
     showToast('Enter both email and password to test.', 'error');
     return;
   }
   document.getElementById('settings-status').textContent = 'Testing connection...';
-  const res = await pywebview.api.test_email_connection(email, password, smtpHost, smtpPort);
+  const res = await pywebview.api.test_email_connection(email, password, smtp.host, smtp.port);
   if (res.ok) {
     document.getElementById('settings-status').innerHTML = '<span style="color:var(--success)">Connection successful!</span>';
   } else {
