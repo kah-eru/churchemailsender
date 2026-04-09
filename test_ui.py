@@ -39,14 +39,20 @@ def open_create_contact_modal(page):
 def fill_and_submit_contact(page, name, email, category="Single", phone="", notes=""):
     page.fill("#cm-name", name)
     page.fill("#cm-email", email)
-    if category == "Family":
-        page.select_option("#cm-category", "Family")
     if phone:
         page.fill("#cm-phone", phone)
     if notes:
         page.fill("#cm-notes", notes)
     page.click("#create-modal button:text('Add')")
     page.wait_for_timeout(500)
+
+
+def add_contact_filter(page, filter_type):
+    """Add a filter via the + button and filter menu."""
+    page.click(".filter-add-btn")
+    page.wait_for_timeout(200)
+    page.click(f".filter-menu-item[data-filter='{filter_type}']")
+    page.wait_for_timeout(200)
 
 
 def open_create_family_modal(page):
@@ -157,18 +163,25 @@ class TestContactsTab:
         visible_rows = page.locator("#contact-list .contact-row:visible")
         expect(visible_rows).to_have_count(0)
 
-    def test_filter_by_category(self, page, app_url):
+    def test_filter_by_optout(self, page, app_url):
         page.goto(app_url)
         wait_for_app(page)
         open_create_contact_modal(page)
-        fill_and_submit_contact(page, "Alice", "alice@x.com", "Single")
+        fill_and_submit_contact(page, "Alice", "alice@x.com")
         open_create_contact_modal(page)
-        fill_and_submit_contact(page, "Bob", "bob@x.com", "Family")
-        page.select_option("#filter-category", "Family")
+        fill_and_submit_contact(page, "Bob", "bob@x.com")
+        # Opt out Bob
+        page.locator("#contact-list .contact-edit-btn").nth(1).click()
+        page.wait_for_timeout(300)
+        page.locator("#ce-optout").check()
+        page.click("#create-modal button:text('Save')")
+        page.wait_for_timeout(500)
+        add_contact_filter(page, "optout")
+        page.select_option("#filter-optout", "active")
         page.wait_for_timeout(300)
         visible_rows = page.locator("#contact-list .contact-row:visible")
         expect(visible_rows).to_have_count(1)
-        expect(visible_rows.first).to_contain_text("Bob")
+        expect(visible_rows.first).to_contain_text("Alice")
 
     def test_delete_contacts(self, page, app_url):
         page.goto(app_url)
@@ -215,6 +228,7 @@ class TestContactsTab:
         page.click("#create-modal button:text('Save')")
         page.wait_for_timeout(500)
         # Filter to opted-out only
+        add_contact_filter(page, "optout")
         page.select_option("#filter-optout", "optout")
         page.wait_for_timeout(300)
         visible = page.locator("#contact-list .contact-row:visible")
@@ -233,11 +247,330 @@ class TestContactsTab:
         page.locator("#ce-optout").check()
         page.click("#create-modal button:text('Save')")
         page.wait_for_timeout(500)
+        add_contact_filter(page, "optout")
         page.select_option("#filter-optout", "active")
         page.wait_for_timeout(300)
         visible = page.locator("#contact-list .contact-row:visible")
         expect(visible).to_have_count(1)
         expect(visible.first).to_contain_text("Active")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CONTACT DETAIL PANEL
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestContactDetailPanel:
+    def test_detail_panel_default_empty(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        expect(page.locator("#contact-detail-content")).to_contain_text("Click a contact to view details")
+
+    def test_click_contact_shows_detail(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        open_create_contact_modal(page)
+        fill_and_submit_contact(page, "Alice", "alice@test.com", phone="555-1234", notes="Board member")
+        page.locator("#contact-list .contact-row").first.click()
+        page.wait_for_timeout(300)
+        detail = page.locator("#contact-detail-content")
+        expect(detail).to_contain_text("alice@test.com")
+        expect(detail).to_contain_text("555-1234")
+        expect(detail).to_contain_text("Board member")
+
+    def test_detail_shows_name_in_header(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        open_create_contact_modal(page)
+        fill_and_submit_contact(page, "Bob Smith", "bob@test.com")
+        page.locator("#contact-list .contact-row").first.click()
+        page.wait_for_timeout(300)
+        expect(page.locator("#contact-detail-title")).to_have_text("Bob Smith")
+
+    def test_detail_shows_no_notes_when_empty(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        open_create_contact_modal(page)
+        fill_and_submit_contact(page, "NoNotes", "nn@test.com")
+        page.locator("#contact-list .contact-row").first.click()
+        page.wait_for_timeout(300)
+        expect(page.locator("#contact-detail-content")).to_contain_text("No notes")
+
+    def test_detail_shows_no_phone_when_empty(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        open_create_contact_modal(page)
+        fill_and_submit_contact(page, "NoPhone", "np@test.com")
+        page.locator("#contact-list .contact-row").first.click()
+        page.wait_for_timeout(300)
+        expect(page.locator("#contact-detail-content")).to_contain_text("Not provided")
+
+    def test_detail_has_edit_button(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        open_create_contact_modal(page)
+        fill_and_submit_contact(page, "EditMe", "edit@test.com")
+        page.locator("#contact-list .contact-row").first.click()
+        page.wait_for_timeout(300)
+        expect(page.locator("#contact-detail-actions button:text('Edit')")).to_be_visible()
+
+    def test_detail_updates_after_edit(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        open_create_contact_modal(page)
+        fill_and_submit_contact(page, "Before", "before@test.com")
+        page.locator("#contact-list .contact-row").first.click()
+        page.wait_for_timeout(300)
+        expect(page.locator("#contact-detail-title")).to_have_text("Before")
+        # Edit the contact
+        page.locator("#contact-list .contact-edit-btn").first.click()
+        page.wait_for_timeout(300)
+        page.locator("#ce-name").fill("After")
+        page.click("#create-modal button:text('Save')")
+        page.wait_for_timeout(500)
+        expect(page.locator("#contact-detail-title")).to_have_text("After")
+
+    def test_selected_row_highlighted(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        open_create_contact_modal(page)
+        fill_and_submit_contact(page, "A", "a@x.com")
+        open_create_contact_modal(page)
+        fill_and_submit_contact(page, "B", "b@x.com")
+        page.locator("#contact-list .contact-row").first.click()
+        page.wait_for_timeout(200)
+        expect(page.locator("#contact-list .contact-row.active")).to_have_count(1)
+
+    def test_detail_shows_category(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        open_create_contact_modal(page)
+        fill_and_submit_contact(page, "SomePerson", "sp@test.com")
+        page.locator("#contact-list .contact-row").first.click()
+        page.wait_for_timeout(300)
+        expect(page.locator("#contact-detail-content")).to_contain_text("Single")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CREATE CONTACT MODAL
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestCreateContactModal:
+    def test_no_category_dropdown(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        open_create_contact_modal(page)
+        expect(page.locator("#cm-category")).to_have_count(0)
+
+    def test_has_family_search(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        open_create_contact_modal(page)
+        expect(page.locator("#cm-fam-search")).to_be_visible()
+
+    def test_has_group_search(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        open_create_contact_modal(page)
+        expect(page.locator("#cm-grp-search")).to_be_visible()
+
+    def test_add_family_in_create(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        # Create family first
+        switch_tab(page, "Families")
+        open_create_family_modal(page)
+        page.fill("#cm-fname", "Smith")
+        page.click("#create-modal button:text('Add')")
+        page.wait_for_timeout(500)
+        # Create contact with family
+        switch_tab(page, "Contacts")
+        open_create_contact_modal(page)
+        page.fill("#cm-name", "John Smith")
+        page.fill("#cm-email", "john@smith.com")
+        page.fill("#cm-fam-search", "Smith")
+        page.wait_for_timeout(300)
+        page.locator("#cm-fam-results .esr-item").first.click()
+        page.wait_for_timeout(200)
+        # Family pill should appear
+        expect(page.locator("#cm-fam-list")).to_contain_text("Smith")
+        page.click("#create-modal button:text('Add')")
+        page.wait_for_timeout(500)
+        # Verify family in detail panel
+        page.locator("#contact-list .contact-row").first.click()
+        page.wait_for_timeout(300)
+        expect(page.locator("#contact-detail-content")).to_contain_text("Smith")
+
+    def test_add_group_in_create(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        # Create group first
+        switch_tab(page, "Groups")
+        open_create_group_modal(page)
+        page.fill("#cm-gname", "Choir")
+        page.click("#create-modal button:text('Add')")
+        page.wait_for_timeout(500)
+        # Create contact with group
+        switch_tab(page, "Contacts")
+        open_create_contact_modal(page)
+        page.fill("#cm-name", "Singer", )
+        page.fill("#cm-email", "singer@x.com")
+        page.fill("#cm-grp-search", "Choir")
+        page.wait_for_timeout(300)
+        page.locator("#cm-grp-results .esr-item").first.click()
+        page.wait_for_timeout(200)
+        expect(page.locator("#cm-grp-list")).to_contain_text("Choir")
+        page.click("#create-modal button:text('Add')")
+        page.wait_for_timeout(500)
+        # Verify group in detail panel
+        page.locator("#contact-list .contact-row").first.click()
+        page.wait_for_timeout(300)
+        expect(page.locator("#contact-detail-content")).to_contain_text("Choir")
+
+    def test_remove_family_pill_in_create(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        switch_tab(page, "Families")
+        open_create_family_modal(page)
+        page.fill("#cm-fname", "Jones")
+        page.click("#create-modal button:text('Add')")
+        page.wait_for_timeout(500)
+        switch_tab(page, "Contacts")
+        open_create_contact_modal(page)
+        page.fill("#cm-fam-search", "Jones")
+        page.wait_for_timeout(300)
+        page.locator("#cm-fam-results .esr-item").first.click()
+        page.wait_for_timeout(200)
+        expect(page.locator("#cm-fam-list")).to_contain_text("Jones")
+        # Remove it
+        page.locator("#cm-fam-list .remove-x").first.click()
+        page.wait_for_timeout(200)
+        expect(page.locator("#cm-fam-list")).not_to_contain_text("Jones")
+
+    def test_add_both_family_and_group(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        # Create family and group
+        switch_tab(page, "Families")
+        open_create_family_modal(page)
+        page.fill("#cm-fname", "Wilson")
+        page.click("#create-modal button:text('Add')")
+        page.wait_for_timeout(500)
+        switch_tab(page, "Groups")
+        open_create_group_modal(page)
+        page.fill("#cm-gname", "Ushers")
+        page.click("#create-modal button:text('Add')")
+        page.wait_for_timeout(500)
+        # Create contact with both
+        switch_tab(page, "Contacts")
+        open_create_contact_modal(page)
+        page.fill("#cm-name", "Amy Wilson")
+        page.fill("#cm-email", "amy@wilson.com")
+        page.fill("#cm-fam-search", "Wilson")
+        page.wait_for_timeout(300)
+        page.locator("#cm-fam-results .esr-item").first.click()
+        page.wait_for_timeout(200)
+        page.fill("#cm-grp-search", "Ushers")
+        page.wait_for_timeout(300)
+        page.locator("#cm-grp-results .esr-item").first.click()
+        page.wait_for_timeout(200)
+        page.click("#create-modal button:text('Add')")
+        page.wait_for_timeout(500)
+        # Verify both in detail panel
+        page.locator("#contact-list .contact-row").first.click()
+        page.wait_for_timeout(300)
+        detail = page.locator("#contact-detail-content")
+        expect(detail).to_contain_text("Wilson")
+        expect(detail).to_contain_text("Ushers")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CONTACT FILTERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestContactFilters:
+    def test_no_filters_by_default(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        # No filter chips should be visible
+        expect(page.locator(".filter-chip")).to_have_count(0)
+
+    def test_add_filter_button_exists(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        expect(page.locator(".filter-add-btn")).to_be_visible()
+
+    def test_add_filter_shows_menu(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        page.click(".filter-add-btn")
+        page.wait_for_timeout(200)
+        expect(page.locator("#filter-menu")).to_be_visible()
+        expect(page.locator(".filter-menu-item")).to_have_count(3)
+
+    def test_add_optout_filter(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        add_contact_filter(page, "optout")
+        expect(page.locator(".filter-chip")).to_have_count(1)
+        expect(page.locator("#filter-optout")).to_be_visible()
+
+    def test_add_multiple_filters(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        add_contact_filter(page, "group")
+        add_contact_filter(page, "optout")
+        expect(page.locator(".filter-chip")).to_have_count(2)
+
+    def test_remove_filter(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        add_contact_filter(page, "optout")
+        expect(page.locator(".filter-chip")).to_have_count(1)
+        page.locator(".filter-remove").first.click()
+        page.wait_for_timeout(200)
+        expect(page.locator(".filter-chip")).to_have_count(0)
+
+    def test_remove_filter_clears_filtering(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        open_create_contact_modal(page)
+        fill_and_submit_contact(page, "Alice", "alice@x.com")
+        open_create_contact_modal(page)
+        fill_and_submit_contact(page, "Bob", "bob@x.com")
+        # Opt out Bob via edit
+        page.locator("#contact-list .contact-edit-btn").nth(1).click()
+        page.wait_for_timeout(300)
+        page.locator("#ce-optout").check()
+        page.click("#create-modal button:text('Save')")
+        page.wait_for_timeout(500)
+        # Add optout filter and filter to active only
+        add_contact_filter(page, "optout")
+        page.select_option("#filter-optout", "active")
+        page.wait_for_timeout(300)
+        expect(page.locator("#contact-list .contact-row:visible")).to_have_count(1)
+        # Remove the filter — should show all again
+        page.locator(".filter-remove").first.click()
+        page.wait_for_timeout(300)
+        expect(page.locator("#contact-list .contact-row:visible")).to_have_count(2)
+
+    def test_already_added_filter_grayed_out(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        add_contact_filter(page, "optout")
+        page.click(".filter-add-btn")
+        page.wait_for_timeout(200)
+        opt_item = page.locator(".filter-menu-item[data-filter='optout']")
+        expect(opt_item).to_have_class(re.compile("added"))
+
+    def test_filter_menu_closes_on_outside_click(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        page.click(".filter-add-btn")
+        page.wait_for_timeout(200)
+        expect(page.locator("#filter-menu")).to_be_visible()
+        page.click("#contact-list")
+        page.wait_for_timeout(200)
+        expect(page.locator("#filter-menu")).not_to_be_visible()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1189,8 +1522,8 @@ class TestEdgeCases:
         title = page.title()
         assert "JS ERR" not in title
 
-    def test_contact_with_family_category(self, page, app_url):
-        """Create a family, then a contact assigned to that family."""
+    def test_create_contact_with_family_assignment(self, page, app_url):
+        """Create a family, then a contact assigned to that family via the create modal."""
         page.goto(app_url)
         wait_for_app(page)
         # Create family first
@@ -1199,25 +1532,32 @@ class TestEdgeCases:
         page.fill("#cm-fname", "Doe")
         page.click("#create-modal button:text('Add')")
         page.wait_for_timeout(500)
-        # Create contact with Family category
+        # Create contact and assign to Doe family
         switch_tab(page, "Contacts")
         open_create_contact_modal(page)
         page.fill("#cm-name", "Jane Doe")
         page.fill("#cm-email", "jane@x.com")
-        page.select_option("#cm-category", "Family")
+        page.fill("#cm-fam-search", "Doe")
+        page.wait_for_timeout(300)
+        page.locator("#cm-fam-results .esr-item").first.click()
         page.wait_for_timeout(200)
-        page.select_option("#cm-family", label="Doe")
         page.click("#create-modal button:text('Add')")
         page.wait_for_timeout(500)
         expect(page.locator("#contact-list")).to_contain_text("Jane Doe")
-        expect(page.locator("#contact-list")).to_contain_text("Doe")
+        # Click to verify family in detail panel
+        page.locator("#contact-list .contact-row").first.click()
+        page.wait_for_timeout(300)
+        expect(page.locator("#contact-detail-content")).to_contain_text("Doe")
 
-    def test_family_dropdown_disabled_for_single(self, page, app_url):
+    def test_create_modal_has_family_and_group_search(self, page, app_url):
         page.goto(app_url)
         wait_for_app(page)
         open_create_contact_modal(page)
-        expect(page.locator("#cm-family")).to_be_disabled()
-        page.select_option("#cm-category", "Family")
-        expect(page.locator("#cm-family")).to_be_enabled()
-        page.select_option("#cm-category", "Single")
-        expect(page.locator("#cm-family")).to_be_disabled()
+        expect(page.locator("#cm-fam-search")).to_be_visible()
+        expect(page.locator("#cm-grp-search")).to_be_visible()
+
+    def test_create_modal_no_category_selector(self, page, app_url):
+        page.goto(app_url)
+        wait_for_app(page)
+        open_create_contact_modal(page)
+        expect(page.locator("#cm-category")).to_have_count(0)

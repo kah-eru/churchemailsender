@@ -31,7 +31,7 @@ import db_manager
 IS_FROZEN = getattr(sys, "frozen", False)
 APP_DIR = os.path.dirname(sys.executable if IS_FROZEN else os.path.abspath(__file__))
 APP_NAME = "Church Roster & Email Dispatcher"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 GITHUB_REPO = "kah-eru/churchemailsender"
 
 _EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
@@ -983,6 +983,12 @@ HTML = r"""<!DOCTYPE html>
   }
   .contact-row { position: relative; }
   .contact-row:hover { background: var(--row-hover); }
+  .contact-row.active { background: var(--accent); color: #fff; }
+  .contact-row.active .name { color: #fff; }
+  .contact-row.active .email { color: rgba(255,255,255,0.8); }
+  .contact-row.active .email span { color: rgba(255,255,255,0.6) !important; }
+  .contact-row.active .col-groups span[style] { color: rgba(255,255,255,0.7) !important; }
+  .contact-row { cursor: pointer; }
   .contact-row input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
   .contact-header {
     display: flex; align-items: center; gap: 8px; padding: 4px 10px; font-size: 11px;
@@ -990,15 +996,11 @@ HTML = r"""<!DOCTYPE html>
     border-bottom: 1px solid var(--border); margin-bottom: 2px;
   }
   .contact-header .h-check { width: 15px; }
-  .contact-header .h-name { flex: 2; min-width: 0; }
-  .contact-header .h-email { flex: 2; min-width: 0; }
-  .contact-header .h-families { flex: 2; min-width: 0; }
-  .contact-header .h-groups { flex: 2; min-width: 0; }
+  .contact-header .h-name { flex: 3; min-width: 0; }
+  .contact-header .h-email { flex: 4; min-width: 0; }
   .contact-header .h-edit { width: 30px; }
-  .contact-row .name { flex: 2; font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .contact-row .email { flex: 2; color: var(--text-muted); font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .contact-row .col-families { flex: 2; display: flex; flex-wrap: wrap; gap: 3px; min-width: 0; }
-  .contact-row .col-groups { flex: 2; display: flex; flex-wrap: wrap; gap: 3px; min-width: 0; }
+  .contact-row .name { flex: 3; font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .contact-row .email { flex: 4; color: var(--text-muted); font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .contact-tag {
     display: inline-block; font-size: 10px; padding: 1px 7px; border-radius: 8px;
     white-space: nowrap; line-height: 1.4;
@@ -1455,12 +1457,45 @@ HTML = r"""<!DOCTYPE html>
   .contact-header span[data-sort].sort-desc::after { content: ' \u25BC'; font-size: 9px; }
 
   /* ── Advanced filter row ── */
-  .filter-row { display: flex; gap: 4px; margin-bottom: 6px; flex-wrap: wrap; align-items: center; }
+  .filter-row { display: flex; gap: 4px; margin-bottom: 6px; flex-wrap: wrap; align-items: center; position: relative; }
   .filter-row select, .filter-row input {
     padding: 4px 6px; font-size: 11px; border: 1px solid var(--border);
     border-radius: 4px; background: var(--surface); color: var(--text);
   }
   .filter-label { font-size: 11px; color: var(--text-muted); }
+  .filter-add-btn {
+    width: 22px; height: 22px; border-radius: 4px; border: 1px dashed var(--border);
+    background: transparent; color: var(--text-muted); font-size: 14px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center; line-height: 1;
+  }
+  .filter-add-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .filter-menu {
+    display: none; position: absolute; top: 100%; left: 0; z-index: 20;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3); min-width: 140px; padding: 4px 0;
+  }
+  .filter-menu.show { display: block; }
+  .filter-menu-item {
+    padding: 6px 12px; font-size: 12px; cursor: pointer; color: var(--text);
+  }
+  .filter-menu-item:hover { background: var(--hover); }
+  .filter-menu-item.added { color: var(--text-muted); pointer-events: none; opacity: 0.5; }
+  .filter-chip {
+    display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px 2px 6px;
+    background: var(--hover); border: 1px solid var(--border); border-radius: 4px; font-size: 11px;
+  }
+  .filter-chip select { border: none; background: transparent; color: var(--text); font-size: 11px; padding: 0; }
+  .filter-chip .filter-remove {
+    cursor: pointer; font-size: 13px; color: var(--text-muted); padding: 0 2px; line-height: 1;
+  }
+  .filter-chip .filter-remove:hover { color: var(--danger); }
+
+  /* ── Contact detail panel ── */
+  .contact-detail-section { margin-bottom: 12px; }
+  .contact-detail-label { font-size: 11px; color: var(--text-muted); margin-bottom: 2px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .contact-detail-value { font-size: 13px; color: var(--text); line-height: 1.5; word-break: break-word; }
+  .contact-detail-value.muted { color: var(--text-muted); font-style: italic; }
+  .contact-detail-tags { display: flex; flex-wrap: wrap; gap: 4px; }
 
   /* ── Analytics ── */
   .analytics-card {
@@ -1568,36 +1603,39 @@ HTML = r"""<!DOCTYPE html>
 
     <!-- Contacts Tab -->
     <div id="contacts-tab" class="tab-content active">
-      <div class="search-row">
-        <input type="text" class="tab-search" id="search-contacts" placeholder="Search contacts..." oninput="filterContacts()">
-        <button class="add-btn" onclick="openCreateContact()" title="Add Contact">+</button>
-      </div>
-      <div class="filter-row">
-        <span class="filter-label">Filter:</span>
-        <select id="filter-category" onchange="filterContacts()">
-          <option value="">All categories</option>
-          <option value="Family">Family</option>
-          <option value="Single">Single</option>
-        </select>
-        <select id="filter-group" onchange="filterContacts()">
-          <option value="">All groups</option>
-        </select>
-        <select id="filter-family" onchange="filterContacts()">
-          <option value="">All families</option>
-        </select>
-        <select id="filter-optout" onchange="filterContacts()">
-          <option value="">Include opted-out</option>
-          <option value="active">Active only</option>
-          <option value="optout">Opted-out only</option>
-        </select>
-      </div>
-      <div class="list-area" id="contact-list"></div>
-      <div class="btn-row" style="flex-wrap:wrap;gap:4px;">
-        <button class="btn btn-danger" onclick="deleteSelected()">Delete Selected</button>
-        <button class="btn btn-primary" onclick="bulkCategoryChange()">Change Category</button>
-        <button class="btn btn-primary" onclick="bulkAddToGroup()">Add to Group</button>
-        <button class="btn btn-primary btn-success" onclick="importCSV()">Import CSV</button>
-        <button class="btn btn-primary" onclick="exportCSV()">Export CSV</button>
+      <div class="groups-split">
+        <div class="groups-left">
+          <div class="search-row">
+            <input type="text" class="tab-search" id="search-contacts" placeholder="Search contacts..." oninput="filterContacts()">
+            <button class="add-btn" onclick="openCreateContact()" title="Add Contact">+</button>
+          </div>
+          <div class="filter-row" id="filter-row">
+            <span class="filter-label">Filter:</span>
+            <div id="active-filters"></div>
+            <button class="filter-add-btn" onclick="toggleFilterMenu()" title="Add filter">+</button>
+            <div class="filter-menu" id="filter-menu">
+              <div class="filter-menu-item" data-filter="group" onclick="addFilter('group')">Group</div>
+              <div class="filter-menu-item" data-filter="family" onclick="addFilter('family')">Family</div>
+              <div class="filter-menu-item" data-filter="optout" onclick="addFilter('optout')">Opt-out Status</div>
+            </div>
+          </div>
+          <div class="list-area" id="contact-list"></div>
+          <div class="btn-row" style="flex-wrap:wrap;gap:4px;">
+            <button class="btn btn-danger" onclick="deleteSelected()">Delete Selected</button>
+            <button class="btn btn-primary" onclick="bulkAddToGroup()">Add to Group</button>
+            <button class="btn btn-primary btn-success" onclick="importCSV()">Import CSV</button>
+            <button class="btn btn-primary" onclick="exportCSV()">Export CSV</button>
+          </div>
+        </div>
+        <div class="groups-right" id="contact-detail-panel">
+          <div class="groups-right-header" id="contact-detail-header">
+            <span class="group-detail-title" id="contact-detail-title">Select a contact</span>
+            <span id="contact-detail-actions"></span>
+          </div>
+          <div class="list-area" id="contact-detail-content">
+            <div class="empty-msg">Click a contact to view details</div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -1989,6 +2027,17 @@ async function loadContacts() {
   await waitForApi();
   cachedContacts = await pywebview.api.get_contacts();
   renderContactList(cachedContacts);
+  // Refresh detail panel if a contact is selected
+  if (_selectedContactId) {
+    var still = cachedContacts.find(c => c.id === _selectedContactId);
+    if (still) showContactDetail(_selectedContactId);
+    else {
+      _selectedContactId = null;
+      document.getElementById('contact-detail-title').textContent = 'Select a contact';
+      document.getElementById('contact-detail-actions').innerHTML = '';
+      document.getElementById('contact-detail-content').innerHTML = '<div class="empty-msg">Click a contact to view details</div>';
+    }
+  }
 }
 
 var _contactSort = { col: 'name', dir: 'asc' };
@@ -2017,6 +2066,8 @@ window.toggleContactSort = function(col) {
   filterContacts();
 };
 
+var _selectedContactId = null;
+
 function renderContactList(contacts) {
   const el = document.getElementById('contact-list');
   if (!contacts.length) { renderEmpty(el, 'No contacts yet.'); return; }
@@ -2028,40 +2079,146 @@ function renderContactList(contacts) {
     '<span class="h-check"></span>' +
     '<span class="h-name" data-sort="name" onclick="toggleContactSort(\'name\')"' + sortCls('name') + '>Name</span>' +
     '<span class="h-email" data-sort="email" onclick="toggleContactSort(\'email\')"' + sortCls('email') + '>Email</span>' +
-    '<span class="h-families">Families</span>' +
-    '<span class="h-groups">Groups</span>' +
     '<span class="h-edit"></span>' +
   '</div>';
   var sorted = sortContacts(contacts);
   const rows = sorted.map(c => {
-    const famTags = (c.families && c.families.length)
-      ? c.families.map(f => '<span class="contact-tag fam-tag">' + esc(f.name) + '</span>').join('')
-      : '<span style="font-size:11px;color:var(--text-dim);">-</span>';
-    const grpTags = (c.groups && c.groups.length)
-      ? c.groups.map(g => '<span class="contact-tag grp-tag">' + esc(g) + '</span>').join('')
-      : '<span style="font-size:11px;color:var(--text-dim);">-</span>';
     var badges = '';
     if (c.opt_out) badges += ' <span class="opt-out-badge">Opted Out</span>';
-    var activity = '';
-    if (c.email_count > 0) activity = '<span style="font-size:10px;color:var(--text-muted);" title="Last emailed: ' + esc(c.last_emailed_at || 'Unknown') + '">' + c.email_count + ' emails</span>';
-    return '<div class="contact-row" id="contact-row-' + c.id + '">' +
-      '<input type="checkbox" data-id="' + c.id + '">' +
+    var activeClass = (_selectedContactId === c.id) ? ' active' : '';
+    return '<div class="contact-row' + activeClass + '" id="contact-row-' + c.id + '" onclick="selectContact(' + c.id + ', event)">' +
+      '<input type="checkbox" data-id="' + c.id + '" onclick="event.stopPropagation()">' +
       '<span class="name">' + esc(c.name) + badges + '</span>' +
       '<span class="email">' + esc(c.email) + (c.phone ? ' <span style="color:var(--text-muted);font-size:10px;">' + esc(c.phone) + '</span>' : '') + '</span>' +
-      '<span class="col-families">' + famTags + '</span>' +
-      '<span class="col-groups">' + grpTags + ' ' + activity + '</span>' +
-      '<button class="contact-edit-btn" onclick="editContact(' + c.id + ')" title="Edit">&#9998;</button>' +
+      '<button class="contact-edit-btn" onclick="event.stopPropagation(); editContact(' + c.id + ')" title="Edit">&#9998;</button>' +
     '</div>';
   }).join('');
   el.innerHTML = header + rows;
 }
 
+window.selectContact = function(id, event) {
+  _selectedContactId = id;
+  // Highlight selected row
+  document.querySelectorAll('#contact-list .contact-row').forEach(r => r.classList.remove('active'));
+  var row = document.getElementById('contact-row-' + id);
+  if (row) row.classList.add('active');
+  showContactDetail(id);
+};
+
+function showContactDetail(id) {
+  var c = cachedContacts.find(x => x.id === id);
+  if (!c) return;
+  var titleEl = document.getElementById('contact-detail-title');
+  var actionsEl = document.getElementById('contact-detail-actions');
+  var contentEl = document.getElementById('contact-detail-content');
+  titleEl.textContent = c.name;
+  actionsEl.innerHTML = '<button class="btn btn-sm btn-primary" onclick="editContact(' + c.id + ')" style="font-size:11px;">Edit</button>';
+
+  var html = '';
+  // Email
+  html += '<div class="contact-detail-section"><div class="contact-detail-label">Email</div>';
+  html += '<div class="contact-detail-value">' + esc(c.email) + '</div></div>';
+  // Phone
+  html += '<div class="contact-detail-section"><div class="contact-detail-label">Phone</div>';
+  html += '<div class="contact-detail-value' + (!c.phone ? ' muted' : '') + '">' + (c.phone ? esc(c.phone) : 'Not provided') + '</div></div>';
+  // Category
+  html += '<div class="contact-detail-section"><div class="contact-detail-label">Category</div>';
+  html += '<div class="contact-detail-value">' + esc(c.category) + '</div></div>';
+  // Notes
+  html += '<div class="contact-detail-section"><div class="contact-detail-label">Notes</div>';
+  html += '<div class="contact-detail-value' + (!c.notes ? ' muted' : '') + '">' + (c.notes ? esc(c.notes) : 'No notes') + '</div></div>';
+  // Families
+  html += '<div class="contact-detail-section"><div class="contact-detail-label">Families</div>';
+  if (c.families && c.families.length) {
+    html += '<div class="contact-detail-tags">' + c.families.map(f => '<span class="contact-tag fam-tag">' + esc(f.name) + '</span>').join('') + '</div>';
+  } else {
+    html += '<div class="contact-detail-value muted">None</div>';
+  }
+  html += '</div>';
+  // Groups
+  var cGroups = cachedGroups.filter(g => g.members.some(m => m.id === id)).map(g => g.name);
+  html += '<div class="contact-detail-section"><div class="contact-detail-label">Groups</div>';
+  if (cGroups.length) {
+    html += '<div class="contact-detail-tags">' + cGroups.map(g => '<span class="contact-tag grp-tag">' + esc(g) + '</span>').join('') + '</div>';
+  } else {
+    html += '<div class="contact-detail-value muted">None</div>';
+  }
+  html += '</div>';
+  // Opt-out
+  if (c.opt_out) {
+    html += '<div class="contact-detail-section"><span class="opt-out-badge" style="font-size:11px;padding:2px 8px;">Opted Out</span></div>';
+  }
+  // Email stats
+  if (c.email_count > 0) {
+    html += '<div class="contact-detail-section"><div class="contact-detail-label">Email Activity</div>';
+    html += '<div class="contact-detail-value">' + c.email_count + ' emails sent';
+    if (c.last_emailed_at) html += ' &middot; Last: ' + esc(c.last_emailed_at.split('T')[0]);
+    html += '</div></div>';
+  }
+  contentEl.innerHTML = html;
+}
+
+var _activeFilters = [];
+
+// Close filter menu when clicking outside
+document.addEventListener('click', function(e) {
+  var menu = document.getElementById('filter-menu');
+  if (menu && !e.target.closest('.filter-add-btn') && !e.target.closest('.filter-menu')) {
+    menu.classList.remove('show');
+  }
+});
+
+window.toggleFilterMenu = function() {
+  var menu = document.getElementById('filter-menu');
+  menu.classList.toggle('show');
+  // Update which items are grayed out
+  menu.querySelectorAll('.filter-menu-item').forEach(item => {
+    var ftype = item.dataset.filter;
+    item.classList.toggle('added', _activeFilters.indexOf(ftype) !== -1);
+  });
+};
+
+window.addFilter = function(filterType) {
+  if (_activeFilters.indexOf(filterType) !== -1) return;
+  _activeFilters.push(filterType);
+  document.getElementById('filter-menu').classList.remove('show');
+  renderActiveFilters();
+  filterContacts();
+};
+
+window.removeFilter = function(filterType) {
+  _activeFilters = _activeFilters.filter(f => f !== filterType);
+  renderActiveFilters();
+  filterContacts();
+};
+
+function renderActiveFilters() {
+  var el = document.getElementById('active-filters');
+  if (!_activeFilters.length) { el.innerHTML = ''; return; }
+  el.innerHTML = _activeFilters.map(function(f) {
+    var selectHtml = '';
+    if (f === 'group') {
+      selectHtml = '<select id="filter-group" onchange="filterContacts()"><option value="">All groups</option>' +
+        cachedGroups.map(g => '<option value="' + esc(g.name) + '">' + esc(g.name) + '</option>').join('') + '</select>';
+    } else if (f === 'family') {
+      selectHtml = '<select id="filter-family" onchange="filterContacts()"><option value="">All families</option>' +
+        cachedFamilies.map(fm => '<option value="' + fm.id + '">' + esc(fm.name) + '</option>').join('') + '</select>';
+    } else if (f === 'optout') {
+      selectHtml = '<select id="filter-optout" onchange="filterContacts()"><option value="">Include opted-out</option>' +
+        '<option value="active">Active only</option><option value="optout">Opted-out only</option></select>';
+    }
+    return '<span class="filter-chip">' + selectHtml + '<span class="filter-remove" onclick="removeFilter(\'' + f + '\')" title="Remove filter">&times;</span></span>';
+  }).join('');
+}
+
 window.filterContacts = function() {
   const q = document.getElementById('search-contacts').value.toLowerCase().trim();
-  const catFilter = document.getElementById('filter-category').value;
-  const grpFilter = document.getElementById('filter-group').value;
-  const famFilter = document.getElementById('filter-family').value;
-  const optFilter = document.getElementById('filter-optout').value;
+  const grpEl = document.getElementById('filter-group');
+  const famEl = document.getElementById('filter-family');
+  const optEl = document.getElementById('filter-optout');
+  const grpFilter = grpEl ? grpEl.value : '';
+  const famFilter = famEl ? famEl.value : '';
+  const optFilter = optEl ? optEl.value : '';
   var filtered = cachedContacts;
   if (q) {
     filtered = filtered.filter(c =>
@@ -2071,7 +2228,6 @@ window.filterContacts = function() {
       (c.groups && c.groups.some(g => g.toLowerCase().includes(q)))
     );
   }
-  if (catFilter) filtered = filtered.filter(c => c.category === catFilter);
   if (grpFilter) filtered = filtered.filter(c => c.groups && c.groups.includes(grpFilter));
   if (famFilter) filtered = filtered.filter(c => c.families && c.families.some(f => String(f.id) === famFilter));
   if (optFilter === 'active') filtered = filtered.filter(c => !c.opt_out);
@@ -2080,14 +2236,8 @@ window.filterContacts = function() {
 };
 
 function updateFilterDropdowns() {
-  var grpSel = document.getElementById('filter-group');
-  var famSel = document.getElementById('filter-family');
-  var gval = grpSel.value, fval = famSel.value;
-  grpSel.innerHTML = '<option value="">All groups</option>' +
-    cachedGroups.map(g => '<option value="' + esc(g.name) + '">' + esc(g.name) + '</option>').join('');
-  famSel.innerHTML = '<option value="">All families</option>' +
-    cachedFamilies.map(f => '<option value="' + f.id + '">' + esc(f.name) + '</option>').join('');
-  grpSel.value = gval; famSel.value = fval;
+  // Re-render active filters to update group/family options
+  renderActiveFilters();
 }
 
 // ── Create modal helpers ──
@@ -2109,38 +2259,119 @@ window.closeCreateModal = function() {
   document.getElementById('create-overlay').classList.remove('show');
 };
 
+var _cmFamilies = [];
+var _cmGroups = [];
+
 window.openCreateContact = function() {
-  var famOptions = '<option value="">No family</option>';
-  cachedFamilies.forEach(function(f) {
-    famOptions += '<option value="' + f.id + '">' + esc(f.name) + '</option>';
-  });
+  _cmFamilies = [];
+  _cmGroups = [];
   showCreateModal(
     '<h3>New Contact</h3>' +
     '<div class="edit-row"><input type="text" id="cm-name" placeholder="Name"><input type="text" id="cm-email" placeholder="Email"></div>' +
     '<div class="edit-row"><input type="text" id="cm-phone" placeholder="Phone (optional)"></div>' +
-    '<div class="edit-row">' +
-      '<select id="cm-category" onchange="document.getElementById(\'cm-family\').disabled = this.value !== \'Family\'"><option value="Single">Single</option><option value="Family">Family</option></select>' +
-      '<select id="cm-family" disabled>' + famOptions + '</select>' +
-    '</div>' +
     '<div class="edit-row"><textarea id="cm-notes" placeholder="Notes (optional)" style="flex:1;padding:6px 10px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);resize:vertical;min-height:40px;font-family:inherit;"></textarea></div>' +
+    '<div class="edit-section-label">Families</div>' +
+    '<div class="edit-member-list" id="cm-fam-list"><span style="font-size:11px;color:var(--text-muted);">None</span></div>' +
+    '<input type="text" id="cm-fam-search" placeholder="Search families to add..." oninput="cmFamSearch()" style="padding:6px 10px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);width:100%;box-sizing:border-box;">' +
+    '<div class="edit-search-results" id="cm-fam-results"></div>' +
+    '<div class="edit-section-label">Groups</div>' +
+    '<div class="edit-member-list" id="cm-grp-list"><span style="font-size:11px;color:var(--text-muted);">None</span></div>' +
+    '<input type="text" id="cm-grp-search" placeholder="Search groups to add..." oninput="cmGrpSearch()" style="padding:6px 10px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);width:100%;box-sizing:border-box;">' +
+    '<div class="edit-search-results" id="cm-grp-results"></div>' +
     '<div class="edit-actions"><button class="btn btn-sm" onclick="closeCreateModal()">Cancel</button><button class="btn btn-primary btn-sm" onclick="submitCreateContact()">Add</button></div>'
   );
   document.getElementById('cm-name').focus();
 };
 
+window.cmRenderFamilies = function() {
+  var el = document.getElementById('cm-fam-list');
+  if (!_cmFamilies.length) { el.innerHTML = '<span style="font-size:11px;color:var(--text-muted);">None</span>'; return; }
+  el.innerHTML = _cmFamilies.map(f =>
+    '<span class="edit-member-pill">' + esc(f.name) + ' <span class="remove-x" onclick="cmRemoveFam(' + f.id + ')">&times;</span></span>'
+  ).join('');
+};
+
+window.cmRemoveFam = function(famId) {
+  _cmFamilies = _cmFamilies.filter(f => f.id !== famId);
+  cmRenderFamilies();
+};
+
+window.cmFamSearch = function() {
+  var el = document.getElementById('cm-fam-results');
+  var q = document.getElementById('cm-fam-search').value.toLowerCase().trim();
+  if (!q) { el.innerHTML = ''; return; }
+  var exclude = _cmFamilies.map(f => f.id);
+  var matches = cachedFamilies.filter(f => exclude.indexOf(f.id) === -1 && f.name.toLowerCase().includes(q)).slice(0, 8);
+  if (!matches.length) { el.innerHTML = '<div class="esr-item" style="color:var(--text-muted);cursor:default;">No matches</div>'; return; }
+  el.innerHTML = matches.map(f => '<div class="esr-item" onclick="cmAddFam(' + f.id + ')">' + esc(f.name) + '</div>').join('');
+};
+
+window.cmAddFam = function(famId) {
+  var f = cachedFamilies.find(x => x.id === famId);
+  if (!f || _cmFamilies.some(x => x.id === famId)) return;
+  _cmFamilies.push({id: f.id, name: f.name});
+  cmRenderFamilies();
+  document.getElementById('cm-fam-search').value = '';
+  document.getElementById('cm-fam-results').innerHTML = '';
+};
+
+window.cmRenderGroups = function() {
+  var el = document.getElementById('cm-grp-list');
+  if (!_cmGroups.length) { el.innerHTML = '<span style="font-size:11px;color:var(--text-muted);">None</span>'; return; }
+  el.innerHTML = _cmGroups.map(g =>
+    '<span class="edit-member-pill">' + esc(g.name) + ' <span class="remove-x" onclick="cmRemoveGrp(' + g.id + ')">&times;</span></span>'
+  ).join('');
+};
+
+window.cmRemoveGrp = function(grpId) {
+  _cmGroups = _cmGroups.filter(g => g.id !== grpId);
+  cmRenderGroups();
+};
+
+window.cmGrpSearch = function() {
+  var el = document.getElementById('cm-grp-results');
+  var q = document.getElementById('cm-grp-search').value.toLowerCase().trim();
+  if (!q) { el.innerHTML = ''; return; }
+  var exclude = _cmGroups.map(g => g.id);
+  var matches = cachedGroups.filter(g => exclude.indexOf(g.id) === -1 && g.name.toLowerCase().includes(q)).slice(0, 8);
+  if (!matches.length) { el.innerHTML = '<div class="esr-item" style="color:var(--text-muted);cursor:default;">No matches</div>'; return; }
+  el.innerHTML = matches.map(g => '<div class="esr-item" onclick="cmAddGrp(' + g.id + ')">' + esc(g.name) + '</div>').join('');
+};
+
+window.cmAddGrp = function(grpId) {
+  var g = cachedGroups.find(x => x.id === grpId);
+  if (!g || _cmGroups.some(x => x.id === grpId)) return;
+  _cmGroups.push({id: g.id, name: g.name});
+  cmRenderGroups();
+  document.getElementById('cm-grp-search').value = '';
+  document.getElementById('cm-grp-results').innerHTML = '';
+};
+
 window.submitCreateContact = async function() {
   var name = document.getElementById('cm-name').value.trim();
   var email = document.getElementById('cm-email').value.trim();
-  var category = document.getElementById('cm-category').value;
-  var familyId = document.getElementById('cm-family').value || null;
   var phone = document.getElementById('cm-phone').value.trim();
   var notes = document.getElementById('cm-notes').value.trim();
   if (!name || !email) { showToast('Enter both name and email.', 'error'); return; }
-  var res = await pywebview.api.add_contact(name, email, category, familyId, phone, notes);
+  var res = await pywebview.api.add_contact(name, email, 'Single', null, phone, notes);
   if (!res.ok) { showToast(res.error, 'error'); return; }
+  // Get the new contact's id
+  var contacts = await pywebview.api.get_contacts();
+  var newContact = contacts.find(c => c.email === email && c.name === name);
+  if (newContact) {
+    // Add to families
+    for (var i = 0; i < _cmFamilies.length; i++) {
+      await pywebview.api.add_family_member(_cmFamilies[i].id, newContact.id);
+    }
+    // Add to groups
+    for (var j = 0; j < _cmGroups.length; j++) {
+      await pywebview.api.add_group_member(_cmGroups[j].id, newContact.id);
+    }
+  }
   closeCreateModal();
   loadContacts();
   loadFamilies();
+  loadGroups();
   refreshAcCache();
 };
 
@@ -2326,9 +2557,7 @@ window.saveEditContact = async function() {
   var optOut = document.getElementById('ce-optout').checked;
   if (!name || !email) { showToast('Enter both name and email.', 'error'); return; }
 
-  // Update contact name/email/phone/notes (keep existing category/family_id for backwards compat)
-  var c = cachedContacts.find(x => x.id === _ceContactId);
-  var res = await pywebview.api.update_contact(_ceContactId, name, email, c ? c.category : 'Single', null, phone, notes);
+  var res = await pywebview.api.update_contact(_ceContactId, name, email, 'Single', null, phone, notes);
   if (!res.ok) { showToast(res.error, 'error'); return; }
   await pywebview.api.set_contact_opt_out(_ceContactId, optOut);
 
