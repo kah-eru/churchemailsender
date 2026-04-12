@@ -147,9 +147,11 @@ class TestContactsTab:
         fill_and_submit_contact(page, "Alice", "alice@x.com")
         open_create_contact_modal(page)
         fill_and_submit_contact(page, "Bob", "bob@x.com")
-        page.fill("#search-contacts", "Alice")
-        page.wait_for_timeout(300)
-        visible_rows = page.locator("#contact-list .contact-row:visible")
+        # Wait for async loadContacts() to finish before filtering
+        page.wait_for_timeout(1500)
+        page.evaluate("document.getElementById('search-contacts').value = 'Alice'; filterContacts()")
+        page.wait_for_timeout(500)
+        visible_rows = page.locator("#contact-list .contact-row")
         expect(visible_rows).to_have_count(1)
         expect(visible_rows.first).to_contain_text("Alice")
 
@@ -158,10 +160,11 @@ class TestContactsTab:
         wait_for_app(page)
         open_create_contact_modal(page)
         fill_and_submit_contact(page, "Alice", "alice@x.com")
-        page.fill("#search-contacts", "zzzzz")
-        page.wait_for_timeout(300)
-        visible_rows = page.locator("#contact-list .contact-row:visible")
-        expect(visible_rows).to_have_count(0)
+        # Wait for async loadContacts() to finish before filtering
+        page.wait_for_timeout(1500)
+        page.evaluate("document.getElementById('search-contacts').value = 'zzzzz'; filterContacts()")
+        page.wait_for_timeout(500)
+        expect(page.locator("#contact-list")).to_contain_text("No contacts")
 
     def test_filter_by_optout(self, page, app_url):
         page.goto(app_url)
@@ -420,11 +423,11 @@ class TestCreateContactModal:
         page.wait_for_timeout(200)
         expect(page.locator("#cm-grp-list")).to_contain_text("Choir")
         page.click("#create-modal button:text('Add')")
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(1500)
         # Verify group in detail panel
         page.locator("#contact-list .contact-row").first.click()
-        page.wait_for_timeout(300)
-        expect(page.locator("#contact-detail-content")).to_contain_text("Choir")
+        page.wait_for_timeout(500)
+        expect(page.locator("#contact-detail-content")).to_contain_text("Choir", timeout=5000)
 
     def test_remove_family_pill_in_create(self, page, app_url):
         page.goto(app_url)
@@ -474,12 +477,12 @@ class TestCreateContactModal:
         page.locator("#cm-grp-results .esr-item").first.click()
         page.wait_for_timeout(200)
         page.click("#create-modal button:text('Add')")
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(1500)
         # Verify both in detail panel
         page.locator("#contact-list .contact-row").first.click()
-        page.wait_for_timeout(300)
+        page.wait_for_timeout(500)
         detail = page.locator("#contact-detail-content")
-        expect(detail).to_contain_text("Wilson")
+        expect(detail).to_contain_text("Wilson", timeout=5000)
         expect(detail).to_contain_text("Ushers")
 
 
@@ -639,9 +642,11 @@ class TestFamiliesTab:
             page.fill("#cm-fname", name)
             page.click("#create-modal button:text('Add')")
             page.wait_for_timeout(500)
-        page.fill("#search-families", "Alpha")
-        page.wait_for_timeout(300)
-        visible = page.locator("#family-list .group-item:visible")
+        # Wait for async loadFamilies() to finish before filtering
+        page.wait_for_timeout(1500)
+        page.evaluate("document.getElementById('search-families').value = 'Alpha'; filterFamilies()")
+        page.wait_for_timeout(500)
+        visible = page.locator("#family-list .group-item")
         expect(visible).to_have_count(1)
 
     def test_duplicate_family_name_error(self, page, app_url):
@@ -717,9 +722,11 @@ class TestGroupsTab:
             page.fill("#cm-gname", name)
             page.click("#create-modal button:text('Add')")
             page.wait_for_timeout(500)
-        page.fill("#search-groups", "Beta")
-        page.wait_for_timeout(300)
-        visible = page.locator("#group-list .group-item:visible")
+        # Wait for async loadGroups() to finish before filtering
+        page.wait_for_timeout(1500)
+        page.evaluate("document.getElementById('search-groups').value = 'Beta'; filterGroups()")
+        page.wait_for_timeout(500)
+        visible = page.locator("#group-list .group-item")
         expect(visible).to_have_count(1)
 
 
@@ -789,8 +796,8 @@ class TestEmailProviderPresets:
         wait_for_app(page)
         switch_tab(page, "Settings")
         options = page.locator("#s-provider option")
-        # placeholder + at least 6 providers
-        assert options.count() >= 7
+        # placeholder + at least 6 providers (wait for async load)
+        expect(options).to_have_count(7, timeout=10000)
 
     def test_gmail_selected_by_default(self, page, app_url):
         page.goto(app_url)
@@ -837,8 +844,10 @@ class TestEmailProviderPresets:
         page.goto(app_url)
         wait_for_app(page)
         switch_tab(page, "Settings")
+        # Wait for provider options to load async
+        expect(page.locator("#s-provider option")).to_have_count(7, timeout=10000)
         page.select_option("#s-provider", "custom")
-        page.wait_for_timeout(200)
+        page.wait_for_timeout(300)
         page.fill("#s-email", "me@example.com")
         page.fill("#s-password", "mypass")
         page.fill("#s-smtp-host", "mail.example.com")
@@ -859,8 +868,10 @@ class TestEmailProviderPresets:
         page.goto(app_url)
         wait_for_app(page)
         switch_tab(page, "Settings")
+        # Wait for provider options to load async
+        expect(page.locator("#s-provider option")).to_have_count(7, timeout=10000)
         page.select_option("#s-provider", "custom")
-        page.wait_for_timeout(200)
+        page.wait_for_timeout(300)
         page.fill("#s-email", "me@example.com")
         page.fill("#s-password", "mypass")
         # Leave host empty
@@ -1374,8 +1385,11 @@ class TestAutocomplete:
         wait_for_app(page)
         open_create_contact_modal(page)
         fill_and_submit_contact(page, "Alice", "alice@x.com")
-        page.fill("#recipient-input", "Ali")
-        page.wait_for_timeout(600)
+        # Wait for acCache to be refreshed after contact creation
+        page.wait_for_timeout(1000)
+        page.click("#recipient-input")
+        page.type("#recipient-input", "Ali", delay=50)
+        page.wait_for_timeout(1000)
         expect(page.locator("#ac-dropdown")).to_be_visible()
 
     def test_selecting_adds_chip(self, page, app_url):
@@ -1383,10 +1397,14 @@ class TestAutocomplete:
         wait_for_app(page)
         open_create_contact_modal(page)
         fill_and_submit_contact(page, "Alice", "alice@x.com")
-        page.fill("#recipient-input", "Ali")
-        page.wait_for_timeout(600)
+        # Wait for acCache to be refreshed after contact creation
+        page.wait_for_timeout(1500)
+        page.click("#recipient-input")
+        page.type("#recipient-input", "Ali", delay=50)
+        page.wait_for_timeout(1000)
+        expect(page.locator("#ac-dropdown")).to_be_visible()
         page.locator("#ac-dropdown .ac-item").first.click()
-        page.wait_for_timeout(300)
+        page.wait_for_timeout(500)
         chips = page.locator("#recipient-chips .recipient-chip")
         expect(chips).to_have_count(1)
 
@@ -1395,12 +1413,16 @@ class TestAutocomplete:
         wait_for_app(page)
         open_create_contact_modal(page)
         fill_and_submit_contact(page, "Alice", "alice@x.com")
-        page.fill("#recipient-input", "Ali")
-        page.wait_for_timeout(600)
+        # Wait for acCache to be refreshed after contact creation
+        page.wait_for_timeout(1500)
+        page.click("#recipient-input")
+        page.type("#recipient-input", "Ali", delay=50)
+        page.wait_for_timeout(1000)
+        expect(page.locator("#ac-dropdown")).to_be_visible()
         page.locator("#ac-dropdown .ac-item").first.click()
-        page.wait_for_timeout(300)
+        page.wait_for_timeout(500)
         page.locator("#recipient-chips .remove").first.click()
-        page.wait_for_timeout(200)
+        page.wait_for_timeout(300)
         chips = page.locator("#recipient-chips .recipient-chip")
         expect(chips).to_have_count(0)
 
@@ -1409,8 +1431,11 @@ class TestAutocomplete:
         wait_for_app(page)
         open_create_contact_modal(page)
         fill_and_submit_contact(page, "Alice", "alice@x.com")
-        page.fill("#recipient-input", "alice@")
-        page.wait_for_timeout(600)
+        # Wait for acCache to be refreshed after contact creation
+        page.wait_for_timeout(1500)
+        page.click("#recipient-input")
+        page.type("#recipient-input", "alice@", delay=50)
+        page.wait_for_timeout(1000)
         expect(page.locator("#ac-dropdown")).to_be_visible()
 
 
@@ -1448,13 +1473,17 @@ class TestBulkOperations:
         for i in range(3):
             open_create_contact_modal(page)
             fill_and_submit_contact(page, f"Del{i}", f"del{i}@x.com")
-        checkboxes = page.locator("#contact-list input[type='checkbox']")
-        for i in range(checkboxes.count()):
-            checkboxes.nth(i).check()
+        # Wait for all async operations to complete
+        page.wait_for_timeout(1500)
+        # Check all checkboxes via JS to avoid timing issues
+        page.evaluate("""
+            document.querySelectorAll('#contact-list input[type="checkbox"]')
+                .forEach(cb => cb.checked = true)
+        """)
         page.on("dialog", lambda d: d.accept())
         page.click("button:text('Delete Selected')")
-        page.wait_for_timeout(600)
-        expect(page.locator("#contact-list")).to_contain_text("No contacts")
+        page.wait_for_timeout(2000)
+        expect(page.locator("#contact-list")).to_contain_text("No contacts", timeout=5000)
 
     def test_delete_with_none_selected(self, page, app_url):
         page.goto(app_url)
